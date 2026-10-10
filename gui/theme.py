@@ -1,24 +1,30 @@
-"""Paleta e tipografia do painel."""
+"""Paleta, tipografia e helpers visuais do painel (estilo HUD)."""
 from __future__ import annotations
 
 import logging
 import tkinter.font as tkfont
 
-from gui.events import ModuleState
+from gui.events import Activity, ModuleState
 
-BG = "#0a0e13"
-PANEL = "#10161e"
-PANEL_ALT = "#0d1218"
-BORDER = "#1e2a37"
-ACCENT = "#00d1ff"
-ACCENT_HOVER = "#00a3c7"
-ACCENT_DIM = "#0b3a4a"
-TEXT = "#d6e0ea"
-MUTED = "#6a7b8c"
-OK = "#2ee59d"
-WARN = "#ffb547"
-ERROR = "#ff5c6c"
-LISTEN = "#b48cff"
+# Base azul-marinho monocromática; cor só para estados.
+BG = "#0c1626"
+HEADER_BG = "#0a1320"
+GRID = "#132137"
+PANEL = "#0f1a2c"
+PANEL_ALT = "#15233a"
+BORDER = "#24344e"
+BRACKET = "#b9c6d8"
+TEXT = "#e6edf6"
+TEXT_DIM = "#a7b4c6"
+MUTED = "#5f7391"
+BAR_BG = "#25354f"
+BAR_FG = "#e6edf6"
+OK = "#5fd3a6"
+WARN = "#e9b965"
+ERROR = "#f07484"
+LISTEN = "#8fb4ff"
+
+GRID_STEP = 30
 
 STATE_COLORS = {
     ModuleState.OFFLINE: MUTED,
@@ -28,21 +34,38 @@ STATE_COLORS = {
     ModuleState.ERROR: ERROR,
 }
 
+ACTIVITY_COLORS = {
+    Activity.IDLE: BRACKET,
+    Activity.LISTENING: LISTEN,
+    Activity.PROCESSING: WARN,
+    Activity.SPEAKING: OK,
+}
+
 LOG_LEVEL_COLORS = {
     logging.DEBUG: MUTED,
-    logging.INFO: "#8fa3b8",
+    logging.INFO: TEXT_DIM,
     logging.WARNING: WARN,
     logging.ERROR: ERROR,
     logging.CRITICAL: ERROR,
 }
 
-_SANS = ("Inter", "Cantarell", "Noto Sans", "DejaVu Sans")
-_MONO = ("JetBrains Mono", "Fira Code", "Adwaita Mono", "Noto Sans Mono", "DejaVu Sans Mono")
+_MONO = ("JetBrains Mono", "Fira Code", "Adwaita Mono", "Noto Sans Mono", "Liberation Mono", "DejaVu Sans Mono")
 
 
-def pick_fonts() -> tuple[str, str]:
-    """Escolhe a primeira fonte instalada. Requer a janela Tk já criada."""
+def pick_mono() -> str:
+    """Primeira fonte monoespaçada instalada. Requer a janela Tk já criada."""
     available = set(tkfont.families())
-    sans = next((f for f in _SANS if f in available), "TkDefaultFont")
-    mono = next((f for f in _MONO if f in available), "TkFixedFont")
-    return sans, mono
+    return next((f for f in _MONO if f in available), "TkFixedFont")
+
+
+def track(text: str) -> str:
+    """Simula letter-spacing (Tk não suporta): 'CORE SYSTEMS' -> 'C O R E   S Y S T E M S'."""
+    return "   ".join(" ".join(word) for word in text.upper().split())
+
+
+def blend(color_a: str, color_b: str, t: float) -> str:
+    """Interpola duas cores hex (t=0 -> a, t=1 -> b). Usado nas animações."""
+    t = min(max(t, 0.0), 1.0)
+    a = [int(color_a[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(color_b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))

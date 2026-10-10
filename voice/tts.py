@@ -1,67 +1,71 @@
-"""Text-to-Speech via espeak-ng em subprocesso.
+"""Text-to-Speech: fachada que une perfil de voz, motores e player.
 
-Por que não pyttsx3: no Linux ele usa o espeak via driver em processo e o
-runAndWait() é conhecido por travar quando chamado de threads ou mais de uma
-vez por sessão. Um subprocesso dá isolamento total: se travar, é morto por
-timeout e o Delsin segue de pé.
+Pipeline por fala (thread "delsin-tts"):  texto -> motor (PCM) -> player
+- Uma fala por vez, em fila.
+- stop() invalida tudo que estiver na fila ou sendo sintetizado (contador de
+  "época") e mata a reprodução atual.
+- Se o motor/voz do perfil não estiver disponível, cai para espeak-ng.
 
-O backend é trocável: para voz natural, substitua _command() por Piper
-(TTS neural local) mantendo a mesma interface.
+Por que não pyttsx3: no Linux o runAndWait() trava quando chamado de threads.
 """
 from __future__ import annotations
 
 import logging
 import queue
-import shutil
-import subprocess
 import threading
+from collections.abc import Callable
+from pathlib import Path
 
 from config.settings import VoiceSettings
+from config.voice_profile import EngineInfo, VoiceCatalog, VoiceProfile
+from voice.engines import EspeakEngine, PiperEngine, SynthesisError
+from voice.player import PcmPlayer
 
 log = logging.getLogger("delsin.voice.tts")
 
+_FALLBACK = VoiceProfile(engine="espeak", voice="pt-br")
+
 
 class TextToSpeech:
-    def __init__(self, settings: VoiceSettings) -> None:
-        self.settings = settings
+    def __init__(
+        self,
+        settings: VoiceSettings,
+        profile: VoiceProfile,
+        voices_dir: Path,
+        on_speaking: Callable[[bool], None] | None = None,
+    ) -> None:
         self.available = False
-        self._binary = shutil.which("espeak-ng") or shutil.which("espeak")
-        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=settings.tts_queue_size)
-        self._proc: subprocess.Popen[str] | None = None
-        self._proc_lock = threading.Lock()
+        self.speaking = False
+        self._piper = PiperEngine(voices_dir, settings.voice_download_timeout_s)
+        self._espeak = EspeakEngine(settings.tts_synthesis_timeout_s)
+        self._engines = {self._piper.name: self._piper, self._espeak.name: self._espeak}
+        self._engine_ok: dict[str, tuple[bool, str]] = {}
+        self._player = PcmPlayer()
+        self._on_speaking = on_speaking or (lambda _speaking: None)
+        self._requested = profile.clamped()
+        self._profile = self._requested
+        self._state_lock = threading.Lock()
+        self._epoch = 0
+        self._queue: queue.Queue[tuple[str, VoiceProfile | None, int] | None] = queue.Queue(
+            maxsize=settings.tts_queue_size
+        )
         self._thread: threading.Thread | None = None
 
+    # ---------- ciclo de vida ----------
+
     def initialize(self) -> tuple[bool, str]:
-        if not self._binary:
-            return False, "espeak-ng não encontrado (sudo dnf install espeak-ng)"
+        if not self._player.tool:
+            return False, "Nenhum player de áudio (pw-play/paplay/aplay)"
+        self._engine_ok = {name: engine.check() for name, engine in self._engines.items()}
+        for name, (ok, detail) in self._engine_ok.items():
+            (log.info if ok else log.warning)("Motor %s: %s", name, detail)
+        if not any(ok for ok, _ in self._engine_ok.values()):
+            return False, "Nenhum motor de voz disponível"
+        self._profile = self._resolve(self._requested)
         self._thread = threading.Thread(target=self._run, name="delsin-tts", daemon=True)
         self._thread.start()
         self.available = True
-        return True, f"Síntese: {self._binary} (voz {self.settings.tts_voice})"
-
-    @property
-    def speaking(self) -> bool:
-        with self._proc_lock:
-            return self._proc is not None and self._proc.poll() is None
-
-    def say(self, text: str) -> None:
-        if not self.available or not text.strip():
-            return
-        try:
-            self._queue.put_nowait(text)
-        except queue.Full:
-            log.warning("Fila de fala cheia — mensagem descartada")
-
-    def stop(self) -> None:
-        """Interrompe a fala atual e esvazia a fila (ex.: antes de ouvir o microfone)."""
-        while True:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
-        with self._proc_lock:
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.terminate()
+        return True, self.describe()
 
     def shutdown(self) -> None:
         if not self.available:
@@ -75,38 +79,102 @@ class TextToSpeech:
             self._thread.join(timeout=2)
         self.available = False
 
-    def _command(self) -> list[str]:
-        # Texto entra por stdin (--stdin): nunca vira argumento de linha de
-        # comando, então não há como ser interpretado como opção ou shell.
-        return [self._binary, "-v", self.settings.tts_voice,
-                "-s", str(self.settings.tts_rate), "--stdin"]
+    # ---------- perfil e catálogo ----------
+
+    @property
+    def profile(self) -> VoiceProfile:
+        with self._state_lock:
+            return self._profile
+
+    def set_profile(self, profile: VoiceProfile) -> VoiceProfile:
+        """Aplica um perfil. Retorna o perfil efetivo (pode ter caído no fallback)."""
+        requested = profile.clamped()
+        resolved = self._resolve(requested)
+        with self._state_lock:
+            self._requested, self._profile = requested, resolved
+        if resolved.engine == "piper":
+            threading.Thread(target=self._piper.preload, args=(resolved.voice,),
+                             name="delsin-voice-load", daemon=True).start()
+        return resolved
+
+    def describe(self) -> str:
+        p = self.profile
+        return f"{self._engines[p.engine].label} · {p.voice} · tom {p.pitch:.2f} · vel. {p.rate:.2f}"
+
+    def catalog(self) -> VoiceCatalog:
+        engines = tuple(
+            EngineInfo(name, engine.label, *self._engine_ok.get(name, (False, "não verificado")))
+            for name, engine in self._engines.items()
+        )
+        voices = {
+            info.name: tuple(self._engines[info.name].voices()) for info in engines if info.available
+        }
+        return VoiceCatalog(engines, voices, self.profile)
+
+    def install_voice(self, engine: str, voice_id: str) -> None:
+        """Bloqueante (download). Chamar fora da thread da GUI."""
+        if engine != "piper":
+            raise SynthesisError("Somente vozes Piper são baixáveis")
+        self._piper.install(voice_id)
+        self._engine_ok["piper"] = self._piper.check()
+
+    def _resolve(self, profile: VoiceProfile) -> VoiceProfile:
+        engine = self._engines.get(profile.engine)
+        if engine and self._engine_ok.get(profile.engine, (False,))[0] and engine.has_voice(profile.voice):
+            return profile
+        if self._engine_ok.get("espeak", (False,))[0]:
+            log.warning("Voz %s/%s indisponível — usando espeak-ng", profile.engine, profile.voice)
+            return VoiceProfile(_FALLBACK.engine, _FALLBACK.voice, profile.rate, profile.pitch, profile.volume)
+        return profile
+
+    # ---------- fala ----------
+
+    def say(self, text: str, profile: VoiceProfile | None = None) -> None:
+        if not self.available or not text.strip():
+            return
+        with self._state_lock:
+            epoch = self._epoch
+        try:
+            self._queue.put_nowait((text, profile, epoch))
+        except queue.Full:
+            log.warning("Fila de fala cheia — mensagem descartada")
+
+    def preview(self, text: str, profile: VoiceProfile) -> None:
+        self.stop()
+        self.say(text, profile.clamped())
+
+    def stop(self) -> None:
+        with self._state_lock:
+            self._epoch += 1
+        self._player.stop()
+
+    def _current_epoch(self) -> int:
+        with self._state_lock:
+            return self._epoch
 
     def _run(self) -> None:
-        while (text := self._queue.get()) is not None:
-            self._speak(text)
-
-    def _speak(self, text: str) -> None:
-        try:
-            with self._proc_lock:
-                self._proc = subprocess.Popen(
-                    self._command(),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-            proc = self._proc
+        profile = self.profile
+        if profile.engine == "piper":
+            self._piper.preload(profile.voice)  # evita 1,3 s de espera na primeira fala
+        while (item := self._queue.get()) is not None:
+            text, override, epoch = item
+            if epoch != self._current_epoch():
+                continue  # descartada por stop()
+            profile = self._resolve(override) if override else self.profile
             try:
-                _, stderr = proc.communicate(text, timeout=self.settings.tts_timeout_s)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                log.warning("TTS excedeu %.0fs — processo encerrado", self.settings.tts_timeout_s)
-                return
-            if proc.returncode not in (0, -15) and stderr:  # -15 = interrompido por stop()
-                log.warning("espeak-ng retornou %s: %s", proc.returncode, stderr.strip())
-        except OSError as exc:
-            log.error("Falha ao executar TTS: %s", exc)
-        finally:
-            with self._proc_lock:
-                self._proc = None
+                clip = self._engines[profile.engine].synthesize(text, profile)
+            except SynthesisError as exc:
+                log.error("Síntese falhou: %s", exc)
+                continue
+            except Exception:
+                log.exception("Erro inesperado na síntese")
+                continue
+            if epoch != self._current_epoch():
+                continue  # stop() chegou durante a síntese
+            self.speaking = True
+            self._on_speaking(True)
+            try:
+                self._player.play(clip)
+            finally:
+                self.speaking = False
+                self._on_speaking(False)

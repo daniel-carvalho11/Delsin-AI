@@ -1,4 +1,10 @@
 from gui.dashboard import Dashboard, DashboardCallbacks
-from gui.events import MessageEvent, ModuleState, StatusEvent, UiEvent
+from gui.events import (
+    Activity, ActivityEvent, MessageEvent, MetricsEvent, MetricView, ModuleState, StatusEvent,
+    UiEvent, VoiceCatalogEvent,
+)
 
-__all__ = ["Dashboard", "DashboardCallbacks", "MessageEvent", "ModuleState", "StatusEvent", "UiEvent"]
+__all__ = [
+    "Activity", "ActivityEvent", "Dashboard", "DashboardCallbacks", "MessageEvent", "MetricView",
+    "MetricsEvent", "ModuleState", "StatusEvent", "UiEvent", "VoiceCatalogEvent",
+]

@@ -4,7 +4,7 @@
 
 | Item | Valor |
 |---|---|
-| Versão | 0.1.0 (MVP) |
+| Versão | 0.2.0 |
 | Plataforma alvo | Linux Fedora 43, Wayland/X11 |
 | Python | 3.14.x (testado em 3.14.7) |
 | Repositório | https://github.com/daniel-carvalho11/Delsin-AI |
@@ -57,6 +57,7 @@ sudo dnf install python3-tkinter portaudio-devel espeak-ng gcc python3-devel
 | customtkinter | 6.0.0 |
 | SpeechRecognition | 3.17.0 (puxa `audioop-lts` e `standard-aifc`, removidos da stdlib no 3.13) |
 | PyAudio | 0.2.14 |
+| piper-tts | 1.8.0 (voz neural local; instala `onnxruntime`) |
 
 As versões **DEVEM** permanecer fixas. Atualizar uma dependência exige: alterar `requirements.txt`, rodar os testes e testar a GUI e a voz manualmente, tudo no mesmo commit.
 
@@ -64,6 +65,7 @@ As versões **DEVEM** permanecer fixas. Atualizar uma dependência exige: altera
 
 - Texto, skills e TTS: **funcionam offline**.
 - STT (voz → texto): **exige internet** no MVP (serviço Google). Ver [§12](#12-limitações-e-gargalos-conhecidos).
+- Download de novas vozes Piper: **exige internet** (HuggingFace, ~63 MB por voz). Depois de baixada, a voz roda offline.
 
 ---
 
@@ -85,8 +87,10 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # 4. Verificação
-python -m unittest discover -s tests -v   # 6 testes, todos OK
+python -m unittest discover -s tests -v   # 14 testes, todos OK
 ```
+
+5. Na primeira execução, abra **♪ → Motor: Piper → Voz: Faber → BAIXAR VOZ** (63 MB). Até lá o Delsin usa o espeak-ng automaticamente.
 
 Regras do ambiente virtual:
 
@@ -129,51 +133,105 @@ Extensão necessária: *Python* (ms-python.python), que instala o *Python Debugg
 ## 4. Uso da interface
 
 ```
-┌──────────────┬──────────────────────────────────────────────┐
-│ DELSIN       │ Console                     10/10/2026 14:03 │
-│              │ ┌──────────────────────────────────────────┐ │
-│ MÓDULOS      │ │ Conversa (Você / Delsin / Sistema)       │ │
-│ ● Núcleo     │ └──────────────────────────────────────────┘ │
-│ ● Skills     │ LOG DE SISTEMA                               │
-│ ● Microfone  │ ┌──────────────────────────────────────────┐ │
-│ ● Voz        │ │ 14:03:01  INFO  Skill registrada: clock  │ │
-│ ● IA / LLM   │ └──────────────────────────────────────────┘ │
-│              │ [ Digite um comando… ] [🎙 Ouvir] [Enviar]   │
-│ ◯ Responder  │                                              │
-│   por voz    │                                              │
-└──────────────┴──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ (◎) D E L S I N                       CARGA GLOBAL ▬▬▬▭▭   [♪] [>_] │
+├──────────────────────┬──────────────────────┬───────────────────────┤
+│ ┌ CORE SYSTEMS ────┐ │ ┌ CONSOLE NEURAL ──┐ │ ┌ PROTOCOLO TEMPORAL ┐│
+│ │ CPU / MEM / DISCO│ │ │ CONVERSA | LOG   │ │ │ calendário + hora  ││
+│ │ TEMP / CARGA     │ │ │                  │ │ │ sessão: comandos,  ││
+│ └──────────────────┘ │ │ mensagens        │ │ │ latência, uptime   ││
+│ ┌ MÓDULOS ─────────┐ │ │                  │ │ └────────────────────┘│
+│ │ núcleo, skills,  │ │ └──────────────────┘ │ ┌ NEURAL TRACE ──────┐│
+│ │ stt, tts, llm    │ │ ┌──────────────────┐ │ │ animação de estado ││
+│ │ [voz] [config.]  │ │ │ campo [OUVIR][>] │ │ │ ESTADO NEURAL · …  ││
+│ └──────────────────┘ │ └──────────────────┘ │ └────────────────────┘│
+├──────────────────────┴──────────────────────┴───────────────────────┤
+│ PYTHON · KERNEL · SO                  DELSIN OS V0.2.0 / OPERACIONAL │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.1 Estados dos módulos
+A janela abre maximizada. Tamanho mínimo: 1280×800.
+
+### 4.1 Painéis
+
+| Painel | Conteúdo | Atualização |
+|---|---|---|
+| Core Systems | CPU, memória, disco (`~`), temperatura, carga média | A cada 2 s (`services/telemetry.py`) |
+| Módulos | Estado de cada módulo + detalhe; switch de voz; botão de configuração de voz | Por evento |
+| Console Neural | Abas **CONVERSA** (últimas 300 mensagens) e **LOG** (últimas 1500 linhas) | Por evento |
+| Barra de comando | Campo de texto, **OUVIR**, **ENVIAR** | — |
+| Protocolo Temporal | Calendário do mês, hora do sistema, estatísticas da sessão | A cada 1 s |
+| Neural Trace | Animação do estado atual do assistente | 30 fps ativo / 15 fps ocioso |
+| Cabeçalho | Carga global (5 segmentos = CPU), **♪** voz, **>_** alterna conversa/log | — |
+| Rodapé | Versões do sistema; `SISTEMA OPERACIONAL` ou `OPERANDO COM RESTRIÇÕES` se algum módulo estiver em erro | Por evento |
+
+Barras de métrica mudam de cor: ≥ 85% âmbar, ≥ 95% vermelho.
+
+### 4.2 Estados dos módulos
 
 | Cor | Estado | Significado |
 |---|---|---|
-| Cinza | `offline` | Não configurado ou desligado |
-| Âmbar | `iniciando` | Verificando dependências/dispositivos |
-| Verde | `online` | Pronto |
-| Roxo | `ativo` | Em operação (ex.: microfone ouvindo) |
-| Vermelho | `erro` | Falhou; o motivo aparece abaixo do nome e no log |
+| Cinza | `OFFLINE` | Não configurado ou desligado |
+| Âmbar | `INICIANDO` | Verificando dependências, dispositivos ou baixando voz |
+| Verde | `ONLINE` | Pronto |
+| Azul | `ATIVO` | Em operação (ex.: microfone ouvindo) |
+| Vermelho | `ERRO` | Falhou; o motivo aparece abaixo do nome e no log |
 
 Uma falha de voz **não** derruba o sistema: o Delsin continua em modo texto.
 
-### 4.2 Atalhos
+### 4.3 Estados neurais (Neural Trace)
 
-| Tecla | Ação |
+| Estado | Cor | Animação | Origem |
+|---|---|---|---|
+| `OCIOSO` | Branco | Núcleo "respirando" devagar | Nenhuma atividade |
+| `PROCESSANDO` | Âmbar | Anel tracejado gira rápido | Comando aguardando resposta do Core |
+| `OUVINDO` | Azul | Ondas expandindo a partir do centro | Microfone aberto |
+| `FALANDO` | Verde | Forma de onda + núcleo pulsando | Áudio sendo reproduzido |
+
+Prioridade quando há mais de um ao mesmo tempo: FALANDO > OUVINDO > PROCESSANDO > OCIOSO.
+
+### 4.4 Atalhos
+
+| Tecla / botão | Ação |
 |---|---|
-| `Enter` | Envia o texto digitado |
-| `Ctrl+Espaço` | Inicia uma escuta (igual ao botão *Ouvir*) |
+| `Enter` (no campo) | Envia o texto digitado |
+| `Ctrl+Espaço` | Inicia uma escuta (igual a **OUVIR**) |
+| **♪** | Abre a configuração de voz |
+| **>_** | Alterna entre CONVERSA e LOG |
 
-### 4.3 Quando o Delsin fala
+### 4.5 Quando o Delsin fala
 
 A resposta é falada se **todas** as condições forem verdadeiras:
 
-1. O módulo **Voz (TTS)** está `online`;
+1. O módulo **VOZ · TTS** está `ONLINE`;
 2. A skill não marcou a resposta como `speak=False` (ex.: `help`);
-3. O switch **Responder por voz** está ligado **ou** o comando veio pelo microfone.
+3. O switch **RESPONDER POR VOZ** está ligado **ou** o comando veio pelo microfone.
 
-Ao clicar em *Ouvir*, qualquer fala em andamento é interrompida (evita que o Delsin transcreva a própria voz).
+Ao clicar em **OUVIR**, qualquer fala em andamento é interrompida (evita que o Delsin transcreva a própria voz).
 
-### 4.4 Comandos disponíveis no MVP
+### 4.6 Configuração de voz (botão ♪ ou CONFIGURAR VOZ)
+
+| Controle | Faixa | Efeito |
+|---|---|---|
+| Motor | Piper (neural) / espeak-ng (leve) | Piper soa natural; espeak é robótico, mas tem variantes femininas |
+| Voz | Lista do motor | Vozes Piper não instaladas aparecem como `[não instalada]` e liberam **BAIXAR VOZ** |
+| Velocidade | 0.60× – 1.60× | Ritmo da fala |
+| Tom | −25% – +30% | Mais grave ↔ mais agudo |
+| Volume | 20% – 150% | Ganho aplicado na síntese (acima de 100% pode distorcer) |
+| Frase | texto livre | Frase usada em **TESTAR** |
+
+- **TESTAR** toca a frase com os valores da tela **sem** salvar.
+- **SALVAR** aplica a todas as respostas seguintes e grava em `~/.local/share/delsin/voice_profile.json`.
+- **BAIXAR VOZ** baixa do catálogo oficial do Piper; o progresso aparece no log e no módulo VOZ · TTS.
+
+Vozes disponíveis:
+
+| Motor | Vozes pt-BR |
+|---|---|
+| Piper | Faber, Cadu, Jeff (qualidade média), Edresson (baixa). **Todas masculinas** — o catálogo oficial não tem voz feminina pt-BR |
+| espeak-ng | Padrão, Masculina 1/3/7, Henrique, Marcelo, Diogo, Feminina 1/2/4, Klatt, Sussurro |
+
+### 4.7 Comandos disponíveis
 
 | Skill | Palavras-gatilho (acentos ignorados) | Exemplo |
 |---|---|---|
@@ -181,7 +239,7 @@ Ao clicar em *Ouvir*, qualquer fala em andamento é interrompida (evita que o De
 | `system_status` | status, diagnóstico, sistema, memória, cpu | "status do sistema" |
 | `help` | ajuda, help, comandos, o que você faz, skills | "ajuda" |
 
-Cada resposta exibe `ok|falha · skill · latência em ms`.
+Cada resposta exibe `ok|falha · skill · latência em ms`. Frases fora dos gatilhos (ex.: "olá, tudo bem?") caem no fallback: conversa livre depende da integração com LLM (roadmap 0.3).
 
 ---
 
@@ -195,7 +253,8 @@ delsin/
 ├── requirements.txt
 ├── config/
 │   ├── settings.py      # Settings imutáveis + caminhos XDG (pathlib)
-│   └── persona.py       # Mensagens e system prompt do Delsin
+│   ├── persona.py       # Mensagens e system prompt do Delsin
+│   └── voice_profile.py # VoiceProfile (motor/voz/tom/velocidade/volume) + JSON atômico
 ├── core/
 │   ├── contracts.py     # Request, Response, Skill, SkillContext, SkillInfo, Source
 │   ├── agent.py         # Agent (execução) + Router (estratégia de escolha)
@@ -204,25 +263,34 @@ delsin/
 │   ├── __init__.py      # discover_skills(): auto-descoberta de plugins
 │   ├── _base.py         # KeywordSkill (base, não descoberta)
 │   └── builtin.py       # clock, system_status, help
+├── services/
+│   └── telemetry.py     # CPU, memória, disco, temperatura, carga (/proc, /sys)
 ├── voice/
 │   ├── stt.py           # SpeechToText (microfone → texto)
-│   ├── tts.py           # TextToSpeech (texto → espeak-ng)
+│   ├── tts.py           # TextToSpeech: fila, perfil, fallback, interrupção
+│   ├── engines.py       # PiperEngine (neural) e EspeakEngine → PCM
+│   ├── player.py        # PcmPlayer (pw-play > paplay > aplay em subprocesso)
 │   └── alsa.py          # Silencia o ruído da libasound no stderr
 ├── gui/
-│   ├── dashboard.py     # Janela customtkinter
-│   ├── events.py        # StatusEvent, MessageEvent, ModuleState
-│   └── theme.py         # Paleta e fontes
+│   ├── dashboard.py     # Janela principal (layout HUD em 3 colunas)
+│   ├── widgets.py       # HudPanel, GridSurface, calendário, Neural Trace, métricas
+│   ├── voice_dialog.py  # Janela de configuração de voz
+│   ├── events.py        # Eventos thread → GUI
+│   └── theme.py         # Paleta, fonte, track() e blend()
 └── tests/
-    └── test_agent.py
+    ├── test_agent.py
+    └── test_voice.py
 ```
 
 ### 5.2 Regras de dependência (obrigatórias)
 
 ```
-            main.py  (único que importa todos)
-         ┌─────┼──────────┬──────────┐
-         ▼     ▼          ▼          ▼
-       gui/  voice/    skills/ ──► core/ ──► config/
+                 main.py  (único que importa todos)
+      ┌───────┬──────┼─────────┬──────────┐
+      ▼       ▼      ▼         ▼          ▼
+    gui/   voice/  services/  skills/ ──► core/
+      │       │                            │
+      └───────┴──────────► config/ ◄───────┘
 ```
 
 | Módulo | PODE importar | NÃO DEVE importar |
@@ -230,8 +298,9 @@ delsin/
 | `config/` | stdlib | qualquer outro módulo do projeto |
 | `core/` | `config/`, stdlib | `gui/`, `voice/`, `skills/` |
 | `skills/` | `core.contracts`, `skills._base`, stdlib | `gui/`, `voice/`, `core.agent` |
-| `voice/` | `config/`, stdlib | `core/`, `gui/`, `skills/` |
-| `gui/` | `core.logger` (só o tipo `LogItem`), stdlib, customtkinter | `core.agent`, `voice/`, `skills/` |
+| `voice/` | `config/`, stdlib, piper | `core/`, `gui/`, `skills/`, `services/` |
+| `services/` | stdlib | qualquer outro módulo do projeto |
+| `gui/` | `config/`, `core.logger` (só o tipo `LogItem`), stdlib, customtkinter | `core.agent`, `voice/`, `skills/`, `services/` |
 | `main.py` | tudo | — |
 
 Violar esta tabela é motivo de rejeição do commit. É ela que permite extrair um agente especialista levando só `core/` + `config/` + as skills dele.
@@ -262,7 +331,10 @@ Entrada (texto ou voz)
 | `delsin-listen` | Captura do microfone + transcrição | Não |
 | `delsin-dispatch-*` | Roteamento e espera pela skill | Não |
 | `delsin-skill-*` | Execução de `Skill.handle()` | Não |
-| `delsin-tts` | Fila de fala → subprocesso `espeak-ng` | Não |
+| `delsin-tts` | Fila de fala → síntese (Piper/espeak) → subprocesso `pw-play` | Não |
+| `delsin-voice-load` | Carrega o modelo Piper ao trocar de voz | Não |
+| `delsin-voice-dl` | Download de vozes (sob demanda) | Não |
+| `delsin-telemetry` | Amostra métricas do host a cada 2 s | Não |
 
 **Regra absoluta:** nenhuma thread além da main **DEVE** chamar métodos de widgets. Comunicação com a GUI **DEVE** passar por `DelsinApp._post()` (fila `events`) ou pelo `logging` (fila de logs). O Tkinter não é thread-safe; violar isso causa travamentos intermitentes e difíceis de reproduzir.
 
@@ -382,10 +454,21 @@ class UptimeSkill(KeywordSkill):
 | `listen_timeout_s` | 5.0 | Espera máxima pelo início da fala |
 | `phrase_time_limit_s` | 10.0 | Duração máxima de uma frase |
 | `recognition_timeout_s` | 8.0 | Timeout da chamada de rede do STT |
-| `tts_voice` | `pt-br` | Voz do espeak-ng (`espeak-ng --voices` lista as opções) |
-| `tts_rate` | 170 | Palavras por minuto |
-| `tts_timeout_s` | 30.0 | Tempo máximo de uma fala antes de matar o processo |
+| `tts_synthesis_timeout_s` | 30.0 | Tempo máximo de síntese do espeak-ng |
+| `voice_download_timeout_s` | 300.0 | Tempo máximo do download de uma voz Piper |
 | `tts_queue_size` | 10 | Falas pendentes; excedentes são descartadas com aviso |
+
+### 8.2.1 `VoiceProfile` (`config/voice_profile.py`, editável pela GUI)
+
+| Campo | Padrão | Faixa | Observação |
+|---|---|---|---|
+| `engine` | `piper` | `piper`, `espeak` | Valor inválido vira `espeak` |
+| `voice` | `pt_BR-faber-medium` | id do motor | Ids Piper são validados por regex (impede path traversal) |
+| `rate` | 1.0 | 0.60 – 1.60 | Valores fora da faixa são limitados |
+| `pitch` | 1.0 | 0.75 – 1.30 | idem |
+| `volume` | 1.0 | 0.20 – 1.50 | idem |
+
+O arquivo é gravado de forma atômica (temporário + rename). Arquivo ausente, corrompido ou com campos desconhecidos → perfil padrão, sem travar o boot.
 
 ### 8.3 Variáveis de ambiente
 
@@ -402,6 +485,8 @@ class UptimeSkill(KeywordSkill):
 |---|---|---|
 | `~/.local/share/delsin/` | Dados do usuário | `0700` |
 | `~/.local/share/delsin/logs/` | Logs | `0700` |
+| `~/.local/share/delsin/voices/` | Modelos Piper (`.onnx` + `.onnx.json`, ~63 MB cada) | `0700` |
+| `~/.local/share/delsin/voice_profile.json` | Perfil de voz salvo | herdada |
 | `~/.cache/delsin/` | Cache (reservado) | `0700` |
 
 As pastas são criadas na inicialização (`ensure_dirs()`), e a permissão é reaplicada a cada execução.
@@ -428,15 +513,28 @@ Listar dispositivos:
 python -c "import speech_recognition as sr; [print(i, n) for i, n in enumerate(sr.Microphone.list_microphone_names())]" 2>/dev/null
 ```
 
-### 9.2 TTS (`voice/tts.py`)
+### 9.2 TTS (`voice/tts.py`, `engines.py`, `player.py`)
 
-- Cada fala é um subprocesso `espeak-ng -v <voz> -s <velocidade> --stdin`.
-- O texto entra **por stdin**, nunca como argumento: não pode ser interpretado como opção ou comando.
-- Fila única, consumida pela thread `delsin-tts`: falas nunca se sobrepõem.
-- `stop()` esvazia a fila e encerra a fala atual (SIGTERM).
+```
+texto → fila (delsin-tts) → motor (PCM 16-bit mono) → PcmPlayer (subprocesso pw-play)
+```
+
+- **Motor e reprodução são separados.** O motor só gera áudio; o player toca. Interromper = matar um processo.
+- **Piper** roda no próprio processo: carrega o modelo uma vez (~1,3 s, feito no boot e ao trocar de voz) e sintetiza cada frase em ~0,1 s. Apenas **um** modelo fica em memória (~100 MB de RAM).
+- **Tom no Piper:** o Piper não tem controle de tom. O Delsin toca o áudio a uma taxa `× tom` (sobe/desce o tom) e alonga os fonemas na mesma proporção (`length_scale = tom / velocidade`), mantendo a duração. Em valores extremos o timbre fica artificial.
+- **espeak-ng** roda como subprocesso com `--stdout`; tom (`-p`), velocidade (`-s`) e amplitude (`-a`) são nativos.
+- O texto entra **por stdin** no espeak-ng, nunca como argumento.
+- **Fallback:** se o motor ou a voz do perfil não estiverem disponíveis, a fala usa `espeak-ng pt-br` com o mesmo tom, velocidade e volume, e o log registra um aviso.
+- **Interrupção:** `stop()` incrementa uma "época"; falas enfileiradas ou em síntese de épocas anteriores são descartadas, e o player atual é encerrado (SIGTERM).
+- **Download de vozes:** só ids do catálogo (`PIPER_CATALOG`). O download vai para uma pasta temporária e só é movido ao final, então uma queda de rede não deixa modelo truncado.
 - O `pyttsx3` **NÃO DEVE** ser usado: o `runAndWait()` dele trava no Linux quando chamado por threads.
 
-Teste isolado: `echo "teste de voz" | espeak-ng -v pt-br --stdin`
+Testes isolados:
+
+```bash
+echo "teste de voz" | espeak-ng -v pt-br --stdin
+python -c "from voice.engines import *; print('ok')"
+```
 
 ---
 
@@ -465,6 +563,8 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | S5 | Skills com efeito colateral (arquivos, rede, sistema) **DEVEM** pedir confirmação explícita na GUI | Uma transcrição errada não pode virar uma ação destrutiva |
 | S6 | Quando um LLM for integrado, as skills que ele puder acionar **DEVEM** estar numa lista de permissões | Limita o raio de dano de uma resposta maliciosa |
 | S7 | O repositório **DEVE** permanecer privado enquanto houver intenção comercial | Proteção do código |
+| S8 | Vozes Piper **DEVEM** vir do catálogo oficial (`PIPER_CATALOG`); o id é validado antes de virar caminho | O perfil é um JSON editável; ids como `../../x` não podem escapar de `voices/` |
+| S9 | Modelos de voz são ONNX (dados, não código executável). **NÃO** carregue modelos `.pt`/pickle de fontes desconhecidas | Pickle executa código ao carregar |
 
 **Privacidade:** no MVP, o áudio de cada comando de voz é enviado ao Google para transcrição. Não fale dados sensíveis até o STT local ser implementado.
 
@@ -479,7 +579,11 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | Timeout de skill não mata a thread | Uma skill travada continua consumindo uma das 4 threads | Skills pesadas em subprocesso |
 | Empate de score | Vence a skill registrada primeiro (ex.: "status do sistema hoje") | Router por LLM ou por pesos |
 | Gatilho por palavra-chave | Não entende paráfrases | Router por LLM |
-| Voz do espeak-ng | Robótica | Piper (TTS neural local), mesma interface |
+| Piper: só vozes masculinas pt-BR | Sem voz feminina natural | Ajustar o tom; treinar/obter um modelo feminino pt-BR |
+| Piper: modelo em memória | ~100 MB de RAM; 1,3 s ao trocar de voz | Aceitável; só um modelo carregado por vez |
+| Tom no Piper por reamostragem | Timbre artificial em valores extremos | Faixa limitada a −25%/+30% |
+| Síntese Piper não tem timeout | Uma frase enorme bloqueia a fila de fala | Entradas limitadas a 2000 caracteres |
+| Animação do Neural Trace | ~1–2% de CPU a 30 fps | 15 fps quando ocioso |
 | Skills só carregam no boot | Nova skill exige reiniciar | Hot-reload (futuro) |
 | Sem wake word | Escuta só por botão/atalho | openWakeWord / Porcupine |
 | GUI via XWayland | Escala em HiDPI pode variar | `ctk.set_widget_scaling()` |
@@ -500,7 +604,11 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | "Serviço de reconhecimento indisponível" | Sem internet ou limite do Google | Verificar a conexão; tentar de novo |
 | Escuta termina sem texto | Silêncio por 5 s ou fala não compreendida | Falar logo após clicar; aproximar do microfone |
 | Delsin transcreve a própria voz | Escuta aberta durante a fala | Já mitigado; usar fone de ouvido se persistir |
-| Voz em `erro` | `espeak-ng` não instalado | `sudo dnf install espeak-ng` |
+| Voz em `erro` | Sem motor ou sem player | `sudo dnf install espeak-ng`; `pip install -r requirements.txt`; conferir `which pw-play` |
+| Log "Voz … indisponível — usando espeak-ng" | Voz Piper do perfil não instalada | ♪ → selecionar a voz → **BAIXAR VOZ** |
+| "Falha no download" | Sem internet ou HuggingFace fora do ar | Tentar de novo; o download parcial é descartado automaticamente |
+| Fonte do painel diferente das capturas | JetBrains Mono não instalada | `sudo dnf install jetbrains-mono-fonts-all` e reiniciar o Delsin |
+| Painel lento ao arrastar/redimensionar | Redesenho do grid de fundo | Esperado durante o redimensionamento; para quando a janela para |
 | Ctrl+C demora a fechar | Uma escuta ou skill ainda em andamento | Aguardar o timeout correspondente (máx. 10 s) |
 
 ---
@@ -549,7 +657,7 @@ git push        # pede autenticação: usar um Personal Access Token (não a sen
 | Fase | Entrega |
 |---|---|
 | 0.1 | MVP: Core, skills por palavra-chave, GUI, STT na nuvem, TTS espeak-ng ✅ |
-| 0.2 | STT local (faster-whisper) e TTS Piper |
+| 0.2 | Painel HUD, telemetria, TTS Piper com perfil de voz configurável ✅ · STT local (faster-whisper) pendente |
 | 0.3 | `LLMRouter` usando `Persona.system_prompt` + lista de permissões de skills |
 | 0.4 | Memória/contexto de conversa persistida em `~/.local/share/delsin` |
 | 0.5 | Wake word ("Delsin") |

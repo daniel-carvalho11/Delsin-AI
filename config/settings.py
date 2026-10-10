@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 APP_NAME = "Delsin"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,6 +23,8 @@ def _xdg_dir(env_var: str, fallback: Path) -> Path:
 DATA_DIR = _xdg_dir("XDG_DATA_HOME", Path.home() / ".local" / "share") / "delsin"
 CACHE_DIR = _xdg_dir("XDG_CACHE_HOME", Path.home() / ".cache") / "delsin"
 LOG_DIR = DATA_DIR / "logs"
+VOICES_DIR = DATA_DIR / "voices"
+VOICE_PROFILE_PATH = DATA_DIR / "voice_profile.json"
 
 
 @dataclass(frozen=True)
@@ -35,9 +37,9 @@ class VoiceSettings:
     listen_timeout_s: float = 5.0
     phrase_time_limit_s: float = 10.0
     recognition_timeout_s: float = 8.0
-    tts_voice: str = "pt-br"
-    tts_rate: int = 170
-    tts_timeout_s: float = 30.0
+    # Voz, tom, velocidade e volume ficam no perfil do usuário (config/voice_profile.py)
+    tts_synthesis_timeout_s: float = 30.0
+    voice_download_timeout_s: float = 300.0
     tts_queue_size: int = 10
 
 
@@ -64,6 +66,6 @@ def load_settings() -> Settings:
 
 def ensure_dirs() -> None:
     """Cria diretórios de dados com permissão restrita ao usuário (0700)."""
-    for directory in (DATA_DIR, CACHE_DIR, LOG_DIR):
+    for directory in (DATA_DIR, CACHE_DIR, LOG_DIR, VOICES_DIR):
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o700)
