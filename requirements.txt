@@ -1,0 +1,6 @@
+# Dependências Python do Delsin — versões FIXAS (testadas em Fedora 43 / Python 3.14.7).
+# Dependências de sistema (obrigatórias antes do pip):
+#   sudo dnf install python3-tkinter portaudio-devel espeak-ng gcc python3-devel
+customtkinter==6.0.0
+SpeechRecognition==3.17.0   # no Python 3.13+ instala também audioop-lts e standard-aifc
+PyAudio==0.2.14
