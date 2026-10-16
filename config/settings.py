@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 APP_NAME = "Delsin"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.4.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,28 +40,61 @@ class VoiceSettings:
     # Voz, tom, velocidade e volume ficam no perfil do usuário (config/voice_profile.py)
     tts_synthesis_timeout_s: float = 30.0
     voice_download_timeout_s: float = 300.0
+    elevenlabs_model: str = "eleven_flash_v2_5"  # baixa latência, multilíngue (pt-BR)
+    elevenlabs_timeout_s: float = 20.0
     tts_queue_size: int = 10
 
 
 @dataclass(frozen=True)
 class CoreSettings:
     skill_timeout_s: float = 10.0
+    fallback_timeout_s: float = 200.0  # LLM na CPU: o primeiro carregamento do modelo é lento
     min_confidence: float = 0.5
     max_input_chars: int = 2000
     skill_workers: int = 4
 
 
 @dataclass(frozen=True)
+class LLMSettings:
+    enabled: bool = True
+    brain: str = "claude"               # "claude" (assinatura via Claude Code) | "ollama" (local)
+    claude_model: str = "claude-opus-5-5"
+    claude_effort: str = "low"          # conversa por voz: low responde mais rápido
+    claude_timeout_s: float = 180.0
+    base_url: str = "http://127.0.0.1:11434"  # Ollama local
+    model: str = "qwen2.5:3b"
+    temperature: float = 0.6
+    context_tokens: int = 4096
+    max_response_tokens: int = 320
+    history_turns: int = 8              # pares pergunta/resposta mantidos como contexto
+    request_timeout_s: float = 120.0
+    keep_alive: str = "30m"             # tempo que o Ollama mantém o modelo na memória
+    allow_remote: bool = False          # só aceita servidores em localhost
+
+
+@dataclass(frozen=True)
 class Settings:
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     core: CoreSettings = field(default_factory=CoreSettings)
+    llm: LLMSettings = field(default_factory=LLMSettings)
     debug: bool = False
 
 
 def load_settings() -> Settings:
-    lang = os.environ.get("DELSIN_LANG")
+    env = os.environ
+    lang = env.get("DELSIN_LANG")
     voice = VoiceSettings(language=lang) if lang else VoiceSettings()
-    return Settings(voice=voice, debug=os.environ.get("DELSIN_DEBUG") == "1")
+    defaults = LLMSettings()
+    llm = LLMSettings(
+        enabled=env.get("DELSIN_LLM_DISABLED") != "1",
+        brain=env.get("DELSIN_BRAIN", defaults.brain),
+        claude_model=env.get("DELSIN_CLAUDE_MODEL", defaults.claude_model),
+        claude_effort=env.get("DELSIN_CLAUDE_EFFORT", defaults.claude_effort),
+        base_url=env.get("DELSIN_LLM_URL", defaults.base_url),
+        model=env.get("DELSIN_LLM_MODEL", defaults.model),
+        allow_remote=env.get("DELSIN_LLM_ALLOW_REMOTE") == "1",
+    )
+    return Settings(voice=voice, llm=llm, debug=env.get("DELSIN_DEBUG") == "1")
 
 
 def ensure_dirs() -> None:

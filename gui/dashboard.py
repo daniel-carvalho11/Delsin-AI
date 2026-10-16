@@ -24,7 +24,7 @@ from config.voice_profile import VoiceCatalog, VoiceProfile
 from core.logger import LogItem
 from gui import theme
 from gui.events import (
-    Activity, ActivityEvent, MessageEvent, MetricsEvent, ModuleState, StatusEvent, UiEvent,
+    ActionRequestEvent, Activity, ActivityEvent, MessageEvent, MetricsEvent, ModuleState, StatusEvent, UiEvent,
     VoiceCatalogEvent,
 )
 from gui.voice_dialog import VoiceDialog, VoiceDialogCallbacks
@@ -49,6 +49,9 @@ class DashboardCallbacks:
     on_preview_voice: Callable[[VoiceProfile, str], None]
     on_save_voice: Callable[[VoiceProfile], None]
     on_install_voice: Callable[[str, str], None]
+    on_test_mic: Callable[[str], None]
+    on_save_elevenlabs_key: Callable[[str], None]
+    on_action_decision: Callable[[str, bool], None]
 
 
 class Dashboard(ctk.CTk):
@@ -309,6 +312,8 @@ class Dashboard(ctk.CTk):
         block = dict(background=theme.PANEL_ALT, lmargin1=16, lmargin2=16, rmargin=16,
                      lmargincolor=theme.PANEL_ALT, rmargincolor=theme.PANEL_ALT)
         text.tag_configure("block", **block)
+        text.tag_configure("block_action", **{**block, "lmargincolor": theme.WARN})
+        text.tag_configure("action_item", foreground=theme.TEXT, font=(self._mono, -13, "bold"))
         text.tag_configure("pad", font=(self._mono, -8))
         text.tag_configure("gap", font=(self._mono, -10))
         text.tag_configure("author_user", foreground=theme.LISTEN, font=(self._mono, -12, "bold"))
@@ -353,7 +358,9 @@ class Dashboard(ctk.CTk):
             return
         self._voice_dialog = VoiceDialog(
             self, self._mono, self._cb.get_voice_catalog(),
-            VoiceDialogCallbacks(self._cb.on_preview_voice, self._cb.on_save_voice, self._cb.on_install_voice),
+            VoiceDialogCallbacks(self._cb.on_preview_voice, self._cb.on_save_voice,
+                                 self._cb.on_install_voice, self._cb.on_test_mic,
+                                 self._cb.on_save_elevenlabs_key),
         )
 
     def close(self) -> None:
@@ -396,9 +403,11 @@ class Dashboard(ctk.CTk):
                 self._set_activity(event.activity)
             case MetricsEvent():
                 self._apply_metrics(event)
+            case ActionRequestEvent():
+                self._append_action_card(event)
             case VoiceCatalogEvent():
                 if self._voice_dialog is not None and self._voice_dialog.winfo_exists():
-                    self._voice_dialog.update_catalog(event.catalog, event.message)
+                    self._voice_dialog.update_catalog(event.catalog, event.message, event.tone)
 
     def _apply_status(self, event: StatusEvent) -> None:
         self._module_states[event.module] = event.state
@@ -461,6 +470,40 @@ class Dashboard(ctk.CTk):
             self._stat_rows["count"].set(str(len(self._latencies)))
             average = sum(self._latencies) / len(self._latencies)
             self._stat_rows["latency"].set(f"{average:.0f} ms")
+
+    def _append_action_card(self, event: ActionRequestEvent) -> None:
+        """Cartão de aprovação embutido na conversa: nada roda sem um clique aqui."""
+        text = self._chat._textbox
+        self._chat.configure(state="normal")
+        text.insert("end", "\n", ("block_action", "pad"))
+        text.insert("end", "  AÇÃO AGUARDANDO APROVAÇÃO", ("block_action", "author_system"))
+        text.insert("end", f"   {datetime.now():%H:%M:%S}  ·  confira exatamente o que será executado\n",
+                    ("block_action", "meta"))
+        for item in event.items:
+            text.insert("end", f"  ▸ {item}\n", ("block_action", "action_item"))
+        bar = ctk.CTkFrame(text, fg_color=theme.PANEL_ALT, corner_radius=0)
+        status = ctk.CTkLabel(bar, text="", text_color=theme.MUTED, font=self._font(11, "bold"))
+        buttons = []
+
+        def decide(approved: bool) -> None:
+            for button in buttons:
+                button.configure(state="disabled")
+            status.configure(text="APROVADA · EXECUTANDO…" if approved else "RECUSADA",
+                             text_color=theme.OK if approved else theme.ERROR)
+            self._cb.on_action_decision(event.request_id, approved)
+
+        buttons.append(self._hud_button(bar, "APROVAR", lambda: decide(True), width=120, primary=True))
+        buttons.append(self._hud_button(bar, "RECUSAR", lambda: decide(False), width=120))
+        for column, widget in enumerate((*buttons, status)):
+            widget.grid(row=0, column=column, padx=(0, 10), pady=4)
+        text.insert("end", "  ", ("block_action",))
+        text.window_create("end", window=bar)
+        text.insert("end", "\n", ("block_action",))
+        text.insert("end", "\n", ("block_action", "pad"))
+        text.insert("end", "\n", ("gap",))
+        self._chat.configure(state="disabled")
+        self._chat.see("end")
+        self._show_tab("chat")
 
     def _append_logs(self, lines: list[LogItem]) -> None:
         self._log.configure(state="normal")

@@ -1,6 +1,7 @@
 """Núcleo de roteamento do Delsin.
 
 Fluxo:  Request -> validação -> Router.select() -> Skill.handle() (worker c/ timeout) -> Response
+        Se nenhuma skill atende -> fallback (ex.: LLM), com timeout próprio e maior.
 
 - O Agent não conhece GUI, voz nem skills concretas: só os contratos.
 - O Router é uma estratégia trocável. Hoje: pontuação por palavras-chave.
@@ -60,6 +61,7 @@ class Agent:
         self.persona = persona
         self.router: Router = router or ScoreRouter(settings.min_confidence)
         self._skills: dict[str, Skill] = {}
+        self._fallback: Skill | None = None
         self._lock = threading.RLock()
         # Pools separados: o dispatcher espera pela skill; se dividissem o mesmo
         # pool, pedidos simultâneos poderiam esgotá-lo e travar (deadlock).
@@ -85,11 +87,21 @@ class Agent:
         log.info("Skill registrada: %s", skill.name)
         return True
 
+    def set_fallback(self, skill: Skill | None) -> None:
+        """Skill acionada quando o router não encontra nenhuma (ex.: conversa com LLM)."""
+        with self._lock:
+            self._fallback = skill
+        log.info("Fallback: %s", skill.name if skill else "mensagem padrão")
+
     def unregister(self, name: str) -> None:
         with self._lock:
             skill = self._skills.pop(name, None)
         if skill:
             self._safe_teardown(skill)
+
+    @property
+    def context(self) -> SkillContext:
+        return self._context
 
     def list_skills(self) -> list[SkillInfo]:
         with self._lock:
@@ -131,23 +143,27 @@ class Agent:
 
         with self._lock:
             skills = list(self._skills.values())
+            fallback = self._fallback
         match = self.router.select(request, skills)
-        if match is None:
+        if match is not None:
+            skill, score = match
+            timeout = self.settings.skill_timeout_s
+            log.debug("[%s] roteado para '%s' (score %.2f)", request.id, skill.name, score)
+        elif fallback is not None:
+            skill, timeout = fallback, self.settings.fallback_timeout_s
+            log.debug("[%s] sem skill; usando fallback '%s'", request.id, skill.name)
+        else:
             return Response(self.persona.fallback, "fallback", success=False)
 
-        skill, score = match
-        log.debug("[%s] roteado para '%s' (score %.2f)", request.id, skill.name, score)
         future = self._workers.submit(skill.handle, request, self._context)
         try:
-            return future.result(timeout=self.settings.skill_timeout_s)
+            return future.result(timeout=timeout)
         except FutureTimeout:
             # Limitação do Python: threads não podem ser mortas. A skill continua
             # rodando em segundo plano até terminar; só abandonamos o resultado.
             future.cancel()
             log.warning("[%s] timeout na skill '%s'", request.id, skill.name)
-            msg = self.persona.timeout.format(
-                skill=skill.name, seconds=self.settings.skill_timeout_s
-            )
+            msg = self.persona.timeout.format(skill=skill.name, seconds=timeout)
             return Response(msg, skill.name, success=False)
         except Exception:
             log.exception("[%s] erro na skill '%s'", request.id, skill.name)
@@ -160,6 +176,9 @@ class Agent:
         self._workers.shutdown(wait=False, cancel_futures=True)
         with self._lock:
             skills, self._skills = list(self._skills.values()), {}
+            if self._fallback is not None and self._fallback not in skills:
+                skills.append(self._fallback)
+            self._fallback = None
         for skill in skills:
             self._safe_teardown(skill)
         log.info("Core desligado")

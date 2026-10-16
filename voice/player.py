@@ -51,8 +51,9 @@ class PcmPlayer:
                 proc.communicate()
                 log.warning("Reprodução travou e foi encerrada")
                 return False
-            if proc.returncode not in (0, -15) and stderr:
-                log.warning("%s retornou %s: %s", self._tool, proc.returncode, stderr.decode(errors="replace").strip())
+            if proc.returncode not in (0, -15):
+                detail = stderr.decode(errors="replace").strip() or "sem mensagem"
+                log.warning("%s retornou %s: %s", self._tool, proc.returncode, detail)
             return proc.returncode == 0
         except OSError as exc:
             log.error("Falha ao executar %s: %s", self._tool, exc)

@@ -8,16 +8,19 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 log = logging.getLogger("delsin.config")
 
-ENGINES = ("piper", "espeak")
+ENGINES = ("elevenlabs", "piper", "espeak")
 RATE_RANGE = (0.6, 1.6)     # multiplicador de velocidade
 PITCH_RANGE = (0.75, 1.30)  # multiplicador de tom
 VOLUME_RANGE = (0.2, 1.5)   # multiplicador de volume
+# Nomes de nós do PipeWire (ex.: alsa_input.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Mic1__source)
+_DEVICE_NAME = re.compile(r"^[\w.\-:@]{0,200}$")
 
 
 def _clamp(value: float, bounds: tuple[float, float]) -> float:
@@ -32,6 +35,7 @@ class VoiceProfile:
     rate: float = 1.0
     pitch: float = 1.0
     volume: float = 1.0
+    input_device: str = ""  # microfone (nome do nó PipeWire); "" = padrão do sistema
 
     def clamped(self) -> VoiceProfile:
         """Normaliza valores vindos de arquivo ou da GUI para faixas seguras."""
@@ -42,6 +46,7 @@ class VoiceProfile:
             rate=round(_clamp(self.rate, RATE_RANGE), 2),
             pitch=round(_clamp(self.pitch, PITCH_RANGE), 2),
             volume=round(_clamp(self.volume, VOLUME_RANGE), 2),
+            input_device=self.input_device if _DEVICE_NAME.match(str(self.input_device)) else "",
         )
 
 
@@ -52,6 +57,13 @@ class VoiceOption:
     label: str
     installed: bool = True
     size_mb: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class InputOption:
+    id: str
+    label: str
+    is_default: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +79,8 @@ class VoiceCatalog:
     engines: tuple[EngineInfo, ...]
     voices: dict[str, tuple[VoiceOption, ...]] = field(default_factory=dict)
     profile: VoiceProfile = field(default_factory=VoiceProfile)
+    inputs: tuple[InputOption, ...] = ()
+    elevenlabs_key: str = "não configurada"  # já mascarada; a chave real nunca vai para a GUI
 
 
 def load_profile(path: Path) -> VoiceProfile:

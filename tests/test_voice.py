@@ -40,6 +40,12 @@ class VoiceProfileTest(unittest.TestCase):
         self.assertGreater(profile.rate, 0)
 
 
+    def test_input_device_name_is_validated(self) -> None:
+        good = "alsa_input.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Mic1__source"
+        self.assertEqual(VoiceProfile(input_device=good).clamped().input_device, good)
+        self.assertEqual(VoiceProfile(input_device="x; rm -rf ~").clamped().input_device, "")
+
+
 class EngineTest(unittest.TestCase):
     def test_piper_rejects_path_traversal(self) -> None:
         engine = PiperEngine(Path(tempfile.gettempdir()), 1)
@@ -61,6 +67,11 @@ class EngineTest(unittest.TestCase):
 
 
 class TextToSpeechTest(unittest.TestCase):
+    def test_preview_signature_matches_dialog_callback(self) -> None:
+        # Regressão: a janela chama on_preview(perfil, texto).
+        tts = TextToSpeech(VoiceSettings(), VoiceProfile(), Path(tempfile.gettempdir()))
+        tts.preview(VoiceProfile("espeak", "pt-br"), "teste")  # não inicializado: não toca, mas não pode quebrar
+
     def test_falls_back_to_espeak_when_voice_missing(self) -> None:
         with tempfile.TemporaryDirectory() as empty_dir:
             tts = TextToSpeech(VoiceSettings(), VoiceProfile("piper", "pt_BR-cadu-medium"), Path(empty_dir))

@@ -14,11 +14,12 @@ import logging
 import queue
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from config.settings import VoiceSettings
 from config.voice_profile import EngineInfo, VoiceCatalog, VoiceProfile
-from voice.engines import EspeakEngine, PiperEngine, SynthesisError
+from voice.engines import ElevenLabsEngine, EspeakEngine, PiperEngine, SynthesisError
 from voice.player import PcmPlayer
 
 log = logging.getLogger("delsin.voice.tts")
@@ -33,12 +34,14 @@ class TextToSpeech:
         profile: VoiceProfile,
         voices_dir: Path,
         on_speaking: Callable[[bool], None] | None = None,
+        elevenlabs_key: Callable[[], str | None] = lambda: None,
     ) -> None:
         self.available = False
         self.speaking = False
         self._piper = PiperEngine(voices_dir, settings.voice_download_timeout_s)
         self._espeak = EspeakEngine(settings.tts_synthesis_timeout_s)
-        self._engines = {self._piper.name: self._piper, self._espeak.name: self._espeak}
+        self._eleven = ElevenLabsEngine(elevenlabs_key, settings.elevenlabs_model, settings.elevenlabs_timeout_s)
+        self._engines = {e.name: e for e in (self._eleven, self._piper, self._espeak)}
         self._engine_ok: dict[str, tuple[bool, str]] = {}
         self._player = PcmPlayer()
         self._on_speaking = on_speaking or (lambda _speaking: None)
@@ -111,6 +114,13 @@ class TextToSpeech:
         }
         return VoiceCatalog(engines, voices, self.profile)
 
+    def refresh_engine(self, name: str) -> tuple[bool, str]:
+        """Revalida um motor (ex.: após salvar a chave da ElevenLabs)."""
+        self._engine_ok[name] = self._engines[name].check()
+        with self._state_lock:
+            self._profile = self._resolve(self._requested)
+        return self._engine_ok[name]
+
     def install_voice(self, engine: str, voice_id: str) -> None:
         """Bloqueante (download). Chamar fora da thread da GUI."""
         if engine != "piper":
@@ -122,9 +132,18 @@ class TextToSpeech:
         engine = self._engines.get(profile.engine)
         if engine and self._engine_ok.get(profile.engine, (False,))[0] and engine.has_voice(profile.voice):
             return profile
+        return self._fallback(profile)
+
+    def _fallback(self, profile: VoiceProfile) -> VoiceProfile:
+        """Piper (se houver voz instalada) e depois espeak-ng, mantendo tom/velocidade/volume."""
+        if profile.engine != "piper" and self._engine_ok.get("piper", (False,))[0]:
+            installed = [o.id for o in self._piper.voices() if o.installed]
+            if installed:
+                log.warning("Voz %s/%s indisponível — usando Piper", profile.engine, profile.voice)
+                return replace(profile, engine="piper", voice=installed[0])
         if self._engine_ok.get("espeak", (False,))[0]:
             log.warning("Voz %s/%s indisponível — usando espeak-ng", profile.engine, profile.voice)
-            return VoiceProfile(_FALLBACK.engine, _FALLBACK.voice, profile.rate, profile.pitch, profile.volume)
+            return replace(profile, engine=_FALLBACK.engine, voice=_FALLBACK.voice)
         return profile
 
     # ---------- fala ----------
@@ -139,7 +158,8 @@ class TextToSpeech:
         except queue.Full:
             log.warning("Fila de fala cheia — mensagem descartada")
 
-    def preview(self, text: str, profile: VoiceProfile) -> None:
+    def preview(self, profile: VoiceProfile, text: str) -> None:
+        """Toca uma amostra com o perfil informado, sem salvá-lo."""
         self.stop()
         self.say(text, profile.clamped())
 
@@ -164,8 +184,16 @@ class TextToSpeech:
             try:
                 clip = self._engines[profile.engine].synthesize(text, profile)
             except SynthesisError as exc:
-                log.error("Síntese falhou: %s", exc)
-                continue
+                # Ex.: créditos da ElevenLabs esgotados ou sem internet: fala com a reserva local.
+                backup = self._fallback(profile)
+                log.error("Síntese %s falhou (%s); tentando %s", profile.engine, exc, backup.engine)
+                if backup.engine == profile.engine:
+                    continue
+                try:
+                    clip = self._engines[backup.engine].synthesize(text, backup)
+                except SynthesisError as backup_exc:
+                    log.error("Reserva também falhou: %s", backup_exc)
+                    continue
             except Exception:
                 log.exception("Erro inesperado na síntese")
                 continue
@@ -173,6 +201,7 @@ class TextToSpeech:
                 continue  # stop() chegou durante a síntese
             self.speaking = True
             self._on_speaking(True)
+            log.info("Falando (%s, %.1f s de áudio)", profile.voice, clip.duration_s)
             try:
                 self._player.play(clip)
             finally:

@@ -66,6 +66,15 @@ class MetricsEvent:
 class VoiceCatalogEvent:
     catalog: VoiceCatalog
     message: str = ""
+    tone: str = "info"  # "ok" | "warn" | "error" | "info"
 
 
-UiEvent = StatusEvent | MessageEvent | ActivityEvent | MetricsEvent | VoiceCatalogEvent
+@dataclass(frozen=True, slots=True)
+class ActionRequestEvent:
+    """O cérebro quer modificar algo no PC; o usuário precisa aprovar."""
+
+    request_id: str
+    items: tuple[str, ...]  # descrições exatas (comando, arquivo) mostradas no cartão
+
+
+UiEvent = StatusEvent | MessageEvent | ActivityEvent | MetricsEvent | VoiceCatalogEvent | ActionRequestEvent
