@@ -124,8 +124,9 @@ class ElevenLabsEngineTest(unittest.TestCase):
         engine = ElevenLabsEngine(lambda: "boa", "eleven_flash_v2_5", 5)
         ok, detail = engine.check()
         self.assertTrue(ok, detail)
-        self.assertEqual(engine.voices()[0].label, "Ana · female brazilian")
-        clip = engine.synthesize("Olá", VoiceProfile("elevenlabs", "AbCdEfGhIjKlMnOpQrSt", pitch=1.1, rate=1.0))
+        self.assertEqual(engine.voices()[0].label, "Ana · feminina · sotaque brazilian")
+        clip = engine.synthesize("Olá", VoiceProfile("elevenlabs", "AbCdEfGhIjKlMnOpQrSt", pitch=1.1, rate=1.0,
+                                                    cloud_model="eleven_flash_v2_5"))
         self.assertEqual(clip.sample_rate, round(22050 * 1.1))
         self.assertEqual(len(clip.pcm), 4410)
         self.assertEqual(_FakeEleven.last_body["language_code"], "pt")
@@ -134,6 +135,27 @@ class ElevenLabsEngineTest(unittest.TestCase):
     def test_bad_key_and_missing_key(self) -> None:
         self.assertFalse(ElevenLabsEngine(lambda: "ruim", "eleven_flash_v2_5", 5).check()[0])
         self.assertIn("não configurada", ElevenLabsEngine(lambda: None, "m", 5).check()[1])
+
+    def test_brazilian_voices_listed_first_and_model_from_profile(self) -> None:
+        voices = {"voices": [
+            {"voice_id": "AAAAAAAAAAAAAAAAAAAA", "name": "Adam - Firm", "labels": {"gender": "male", "accent": "american"}},
+            {"voice_id": "ZZZZZZZZZZZZZZZZZZZZ", "name": "Will - Relaxed", "labels": {"gender": "male"},
+             "verified_languages": [{"language": "pt", "locale": "pt-BR"}]},
+        ]}
+        engine = ElevenLabsEngine(lambda: "boa", "eleven_flash_v2_5", 5)
+        engine._request = lambda *_a, **_k: json.dumps(voices).encode()
+        labels = [o.label for o in engine.voices()]
+        self.assertEqual(labels[0], "Will · masculina · pt-BR verificada")
+        self.assertEqual(labels[1], "Adam · masculina · sotaque american")
+        self.assertEqual(VoiceProfile(cloud_model="inventado").clamped().cloud_model, "eleven_multilingual_v2")
+
+    def test_api_error_messages_are_explained(self) -> None:
+        from voice.engines import _eleven_error
+
+        body = '{"detail": {"status": "payment_required", "message": "Free users cannot use library voices via the API."}}'
+        self.assertIn("Voice Library exige plano pago", _eleven_error(402, body))
+        body = '{"detail": {"status": "quota_exceeded", "message": "This request exceeds your quota."}}'
+        self.assertIn("créditos do mês esgotados", _eleven_error(401, body))
 
     def test_voice_id_is_validated(self) -> None:
         engine = ElevenLabsEngine(lambda: "boa", "eleven_flash_v2_5", 5)

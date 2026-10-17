@@ -272,8 +272,7 @@ class ElevenLabsEngine:
         except urllib.error.HTTPError as exc:
             with exc:
                 detail = exc.read(2000).decode(errors="replace")
-            reason = {401: "chave inválida", 402: "créditos esgotados", 429: "limite de uso/créditos atingido"}
-            raise SynthesisError(f"ElevenLabs HTTP {exc.code}: {reason.get(exc.code, detail[:200])}") from exc
+            raise SynthesisError(f"ElevenLabs HTTP {exc.code}: {_eleven_error(exc.code, detail)}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise SynthesisError(f"ElevenLabs inacessível: {exc}") from exc
 
@@ -291,13 +290,21 @@ class ElevenLabsEngine:
             if self._voices is not None and not force:
                 return self._voices
         raw = json.loads(self._request("GET", "/v2/voices?page_size=100&include_total_count=false"))
-        options = []
+        options, brazilian = [], set()
+        genders = {"female": "feminina", "male": "masculina", "neutral": "neutra"}
         for voice in raw.get("voices", []):
             labels = voice.get("labels") or {}
-            extra = " ".join(v for v in (labels.get("gender"), labels.get("accent")) if v)
-            label = f"{voice.get('name', '?')}" + (f" · {extra}" if extra else "")
-            options.append(VoiceOption(self.name, voice["voice_id"], label))
-        options.sort(key=lambda o: o.label.lower())
+            # "Charlie - Deep, Confident, Energetic" -> "Charlie"
+            name = str(voice.get("name", "?")).split(" - ")[0].strip()
+            verified = any(v.get("locale") == "pt-BR" or v.get("language") == "pt"
+                           for v in voice.get("verified_languages") or [])
+            parts = [name, genders.get(labels.get("gender", ""), labels.get("gender", ""))]
+            parts.append("pt-BR verificada" if verified else f"sotaque {labels.get('accent', '?')}")
+            options.append(VoiceOption(self.name, voice["voice_id"], " · ".join(p for p in parts if p)))
+            if verified:
+                brazilian.add(voice["voice_id"])
+        # Vozes verificadas em pt-BR primeiro; dentro de cada grupo, ordem alfabética.
+        options.sort(key=lambda o: (o.id not in brazilian, o.label.lower()))
         with self._lock:
             self._voices = options
         return options
@@ -319,21 +326,51 @@ class ElevenLabsEngine:
     def synthesize(self, text: str, profile: VoiceProfile) -> AudioClip:
         if not _ELEVEN_ID.match(profile.voice):
             raise SynthesisError(f"Identificador de voz ElevenLabs inválido: {profile.voice!r}")
+        model = profile.cloud_model or self._model
         payload = {
             "text": text,
-            "model_id": self._model,
+            "model_id": model,
             "voice_settings": {
                 "stability": 0.5,
                 "similarity_boost": 0.75,
                 "speed": round(min(max(profile.rate / profile.pitch, 0.7), 1.2), 2),
             },
         }
-        if "flash" in self._model or "turbo" in self._model:
+        if "flash" in model or "turbo" in model:
             payload["language_code"] = "pt"  # multilingual_v2 não aceita este campo
         pcm = self._request("POST", f"/v1/text-to-speech/{profile.voice}?output_format=pcm_{_ELEVEN_RATE}", payload)
         if profile.volume != 1.0:
             pcm = scale_volume(pcm, profile.volume)
         return AudioClip(pcm, round(_ELEVEN_RATE * profile.pitch))
+
+
+def _eleven_error(code: int, body: str) -> str:
+    """Traduz o erro da API mantendo a mensagem original (ela diz o motivo real)."""
+    try:
+        detail = json.loads(body).get("detail")
+    except ValueError:
+        detail = None
+    status, message = "", body[:200]
+    if isinstance(detail, dict):
+        status, message = str(detail.get("status", "")), str(detail.get("message", message))
+    elif isinstance(detail, str):
+        message = detail
+    hints = {
+        "quota_exceeded": "créditos do mês esgotados",
+        "detected_unusual_activity": "plano grátis bloqueado por atividade incomum (VPN/proxy?)",
+        "invalid_api_key": "chave inválida",
+        "missing_permissions": "a chave não tem permissão de Text to Speech/Voices",
+        "voice_not_found": "voz não encontrada",
+    }
+    if status in hints:
+        return f"{hints[status]} — {message}"
+    if code == 402 and "library" in message.lower():
+        return f"voz da Voice Library exige plano pago pela API; use uma voz padrão — {message}"
+    if code == 401:
+        return f"chave inválida ou sem permissão — {message}"
+    if code == 429:
+        return f"limite de uso atingido — {message}"
+    return message
 
 
 def scale_volume(pcm: bytes, factor: float) -> bytes:

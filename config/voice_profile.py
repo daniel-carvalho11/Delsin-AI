@@ -16,6 +16,12 @@ from pathlib import Path
 log = logging.getLogger("delsin.config")
 
 ENGINES = ("elevenlabs", "piper", "espeak")
+# Modelos ElevenLabs oferecidos na GUI: (id, rótulo). flash = rápido e barato;
+# multilingual_v2 = sotaque pt-BR mais natural nas vozes verificadas, o dobro de créditos.
+ELEVEN_MODELS = (
+    ("eleven_multilingual_v2", "Natural pt-BR (multilingual v2)"),
+    ("eleven_flash_v2_5", "Rápido e econômico (flash v2.5)"),
+)
 RATE_RANGE = (0.6, 1.6)     # multiplicador de velocidade
 PITCH_RANGE = (0.75, 1.30)  # multiplicador de tom
 VOLUME_RANGE = (0.2, 1.5)   # multiplicador de volume
@@ -36,6 +42,7 @@ class VoiceProfile:
     pitch: float = 1.0
     volume: float = 1.0
     input_device: str = ""  # microfone (nome do nó PipeWire); "" = padrão do sistema
+    cloud_model: str = "eleven_multilingual_v2"  # modelo da ElevenLabs
 
     def clamped(self) -> VoiceProfile:
         """Normaliza valores vindos de arquivo ou da GUI para faixas seguras."""
@@ -47,6 +54,7 @@ class VoiceProfile:
             pitch=round(_clamp(self.pitch, PITCH_RANGE), 2),
             volume=round(_clamp(self.volume, VOLUME_RANGE), 2),
             input_device=self.input_device if _DEVICE_NAME.match(str(self.input_device)) else "",
+            cloud_model=self.cloud_model if self.cloud_model in dict(ELEVEN_MODELS) else ELEVEN_MODELS[0][0],
         )
 
 

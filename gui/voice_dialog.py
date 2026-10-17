@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import customtkinter as ctk
 
 from config.voice_profile import (
-    PITCH_RANGE, RATE_RANGE, VOLUME_RANGE, VoiceCatalog, VoiceOption, VoiceProfile,
+    ELEVEN_MODELS, PITCH_RANGE, RATE_RANGE, VOLUME_RANGE, VoiceCatalog, VoiceOption, VoiceProfile,
 )
 from gui import theme
 
@@ -29,8 +29,8 @@ class VoiceDialog(ctk.CTkToplevel):
         super().__init__(master, fg_color=theme.PANEL)
         self._mono, self._cb, self._catalog = mono, callbacks, catalog
         self.title("Delsin · voz e microfone")
-        self.geometry("680x780")
-        self.minsize(640, 740)
+        self.geometry("720x860")
+        self.minsize(680, 820)
         self.transient(master)
         self.grid_columnconfigure(0, weight=1)
 
@@ -38,6 +38,7 @@ class VoiceDialog(ctk.CTkToplevel):
         self._engine = profile.engine
         self._voice_id = profile.voice
         self._input_id = profile.input_device
+        self._cloud_model = profile.cloud_model
         self._options: list[VoiceOption] = []
         self._input_labels: dict[str, str] = {}
 
@@ -97,6 +98,19 @@ class VoiceDialog(ctk.CTkToplevel):
                                  placeholder_text=f"chave da API · atual: {catalog.elevenlabs_key}")
         self._key.grid(row=12, column=1, sticky="ew", padx=(0, 10), pady=6)
         self._button(form, "SALVAR CHAVE", self._save_key, primary=False).grid(row=12, column=2, sticky="e")
+        self._section(form, 13, "Modelo nuvem")
+        self._model_labels = dict(ELEVEN_MODELS)
+        self._model_switch = ctk.CTkSegmentedButton(
+            form, values=list(self._model_labels.values()), command=self._on_model,
+            font=ctk.CTkFont(mono, 11), selected_color=theme.BORDER, selected_hover_color=theme.MUTED,
+            unselected_color=theme.PANEL_ALT, fg_color=theme.PANEL_ALT, text_color=theme.TEXT,
+        )
+        self._model_switch.set(self._model_labels.get(self._cloud_model, ELEVEN_MODELS[0][1]))
+        self._model_switch.grid(row=13, column=1, columnspan=2, sticky="ew", pady=6)
+        ctk.CTkLabel(form, text="Natural: sotaque brasileiro melhor, gasta o dobro de créditos "
+                                "(plano grátis ≈ 10 min/mês). Rápido: ≈ 20 min/mês.",
+                     anchor="w", justify="left", wraplength=440, text_color=theme.MUTED,
+                     font=ctk.CTkFont(mono, 10)).grid(row=14, column=1, columnspan=2, sticky="ew")
 
         self._status = ctk.CTkLabel(self, text="", anchor="w", text_color=theme.TEXT_DIM,
                                     font=ctk.CTkFont(mono, 11), wraplength=560, justify="left")
@@ -211,8 +225,8 @@ class VoiceDialog(ctk.CTkToplevel):
             self._install_btn.grid_remove()
 
     def _profile(self) -> VoiceProfile:
-        return VoiceProfile(self._engine, self._voice_id, self._rate.get(),
-                            self._pitch.get(), self._volume.get(), self._input_id).clamped()
+        return VoiceProfile(self._engine, self._voice_id, self._rate.get(), self._pitch.get(),
+                            self._volume.get(), self._input_id, self._cloud_model).clamped()
 
     def _ready(self) -> bool:
         option = self._selected()
@@ -231,6 +245,9 @@ class VoiceDialog(ctk.CTkToplevel):
 
     def _on_input(self, label: str) -> None:
         self._input_id = next((key for key, value in self._input_labels.items() if value == label), "")
+
+    def _on_model(self, label: str) -> None:
+        self._cloud_model = next((k for k, v in self._model_labels.items() if v == label), ELEVEN_MODELS[0][0])
 
     def _on_engine(self, label: str) -> None:
         self._engine = self._engine_labels[label]
