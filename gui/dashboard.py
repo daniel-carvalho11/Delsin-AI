@@ -107,7 +107,7 @@ class Dashboard(ctk.CTk):
 
         self.title(f"{app_name} · painel de controle")
         self.geometry("1600x960")
-        self.minsize(1280, 800)
+        self.minsize(1100, 720)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(80, self._maximize)
 
@@ -194,14 +194,23 @@ class Dashboard(ctk.CTk):
         modules = HudPanel(left, self._mono, "Módulos")
         modules.grid(row=1, column=0, sticky="nsew", padx=(outer, gap), pady=(gap, outer))
         left.grid_rowconfigure(1, weight=1)
+        # Lista rolável (roda do mouse/barra) e controles fixos embaixo: em telas
+        # baixas os botões continuam visíveis em vez de serem cortados.
+        module_list = ctk.CTkScrollableFrame(
+            modules.content, fg_color="transparent", corner_radius=0, height=60,
+            scrollbar_button_color=theme.BORDER, scrollbar_button_hover_color=theme.MUTED,
+        )
+        module_list._scrollbar.configure(height=40)  # padrão de 200 px impediria encolher
+        module_list.grid(row=0, column=0, sticky="nsew")
+        module_list.grid_columnconfigure(0, weight=1)
+        modules.content.grid_rowconfigure(0, weight=1)
         self._status_rows: dict[str, ModuleRow] = {}
         for row, (key, label) in enumerate(self.MODULES):
-            module = ModuleRow(modules.content, self._mono, label, "OFFLINE")
-            module.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+            module = ModuleRow(module_list, self._mono, label, "OFFLINE")
+            module.grid(row=row, column=0, sticky="ew", pady=(0, 8), padx=(0, 6))
             self._status_rows[key] = module
-        modules.content.grid_rowconfigure(len(self.MODULES), weight=1)
         controls = ctk.CTkFrame(modules.content, fg_color="transparent")
-        controls.grid(row=len(self.MODULES) + 1, column=0, sticky="ew")
+        controls.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         controls.grid_columnconfigure(0, weight=1)
         self._voice_switch = ctk.CTkSwitch(
             controls, text="RESPONDER POR VOZ", command=self._on_voice_switch, state="disabled",
@@ -215,9 +224,9 @@ class Dashboard(ctk.CTk):
             progress_color=theme.TEXT_DIM, button_color=theme.TEXT, fg_color=theme.BAR_BG,
             text_color=theme.TEXT_DIM, font=self._font(11),
         )
-        self._wake_switch.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        self._wake_switch.grid(row=1, column=0, sticky="w", pady=(0, 10))
         self._hud_button(controls, "CONFIGURAR VOZ", self.open_voice_settings).grid(
-            row=3, column=0, sticky="ew")
+            row=2, column=0, sticky="ew")
 
         # ---- coluna central
         console = HudPanel(center, self._mono, "Console Neural")
