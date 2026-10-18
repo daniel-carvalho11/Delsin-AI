@@ -4,7 +4,7 @@
 
 | Item | Valor |
 |---|---|
-| Versão | 0.4.0 |
+| Versão | 0.5.0 |
 | Plataforma alvo | Linux Fedora 43, Wayland/X11 |
 | Python | 3.14.x (testado em 3.14.7) |
 | Repositório | https://github.com/daniel-carvalho11/Delsin-AI (público) |
@@ -46,7 +46,7 @@ Convenção deste manual: **DEVE** = obrigatório; **NÃO DEVE** = proibido; **R
 | `espeak-ng` | Síntese de voz (TTS) |
 | PipeWire + `pipewire-utils` (padrão no Fedora) | Servidor de áudio; `pw-record`/`pw-dump` capturam e listam microfones, `pw-play` toca a voz |
 | **Claude Code** (§2.1) | Cérebro principal: o Delsin conversa com o Claude pelo CLI `claude`, logado na sua assinatura (Pro/Max) |
-| **Ollama** (opcional, §2.3) | Cérebro alternativo 100% local e offline |
+| **Ollama** (opcional, §2.4) | Cérebro alternativo 100% local e offline |
 | Conta **ElevenLabs** (opcional, §2.2) | Voz neural na nuvem |
 
 ```bash
@@ -61,6 +61,7 @@ sudo dnf install python3-tkinter portaudio-devel espeak-ng gcc python3-devel
 | SpeechRecognition | 3.17.0 (puxa `audioop-lts` e `standard-aifc`, removidos da stdlib no 3.13) |
 | PyAudio | 0.2.14 |
 | piper-tts | 1.8.0 (voz neural local; instala `onnxruntime`) |
+| faster-whisper | 1.2.1 (palavra de ativação "Delsin", local; instala `ctranslate2` e `av`, ~250 MB) |
 
 As versões **DEVEM** permanecer fixas. Atualizar uma dependência exige: alterar `requirements.txt`, rodar os testes e testar a GUI e a voz manualmente, tudo no mesmo commit.
 
@@ -93,7 +94,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # 4. Verificação
-python -m unittest discover -s tests -v   # 41 testes, todos OK (sem rede e sem gastar cota)
+python -m unittest discover -s tests -v   # 43 testes, todos OK (sem rede e sem gastar cota)
 ```
 
 5. Na primeira execução, abra **♪ → Motor: Piper → Voz: Faber → BAIXAR VOZ** (63 MB). Até lá o Delsin usa o espeak-ng automaticamente.
@@ -127,7 +128,22 @@ claude auth status
 
 Sem créditos, sem internet ou com a chave inválida, cada fala cai automaticamente para o Piper (e, sem ele, para o espeak-ng).
 
-### 2.3 Cérebro local (Ollama, opcional)
+### 2.3 Integrações (Notion agora; Google em seguida)
+
+O Delsin **não** usa os conectores do claude.ai. Ele passa ao Claude Code os próprios servidores MCP, gerados em `~/.config/delsin/mcp.json` (0600) a partir das chaves salvas, com `--strict-mcp-config`: nenhuma outra integração entra.
+
+**Notion** (botão **⧉** no cabeçalho):
+1. notion.so/profile/integrations → **Nova integração** → tipo **Interna** → copie o *Internal Integration Secret* (`ntn_…`).
+2. Em cada página ou banco que o Delsin pode ver: **••• → Conexões →** adicione a integração. Sem isso, a busca volta vazia.
+3. **⧉ → cole o token → SALVAR.** A sessão do Claude reinicia já com o Notion (servidor oficial `@notionhq/notion-mcp-server@2.5.2`, via `npx`; requer Node.js).
+
+**Google (Gmail, Agenda, Classroom):** exige um cliente OAuth do Google Cloud criado na sua conta (o Google não permite fazer isso por você):
+1. console.cloud.google.com → novo projeto → **APIs e serviços → Biblioteca**: ative *Gmail API*, *Google Calendar API* e *Google Classroom API*.
+2. **Tela de consentimento OAuth**: tipo *Externo*, modo *Teste*, adicione o seu e-mail como usuário de teste.
+3. **Credenciais → Criar → ID do cliente OAuth → App para computador** → baixe o `client_secret_….json`.
+4. Guarde o arquivo em `~/.config/delsin/` (nunca no repositório) e avise: a integração Google é a próxima entrega (Gmail/Agenda via `workspace-mcp`, MIT; Classroom via servidor próprio do Delsin, pois nenhum servidor pronto cobre o Classroom).
+
+### 2.4 Cérebro local (Ollama, opcional)
 
 Para usar: `DELSIN_BRAIN=ollama python main.py`. O modo local não tem internet nem executa ações.
 
@@ -333,28 +349,43 @@ Cada resposta exibe `ok|falha · skill · latência em ms`.
 - **Estilo:** português do Brasil, no máximo 3 frases curtas, sem markdown (as respostas podem ser faladas). Peça "detalhe" para respostas maiores.
 - **Cérebro fora do ar:** a resposta explica o motivo e o módulo IA · LLM fica `ERRO`. A sessão do Claude se recria sozinha na próxima pergunta.
 
-### 4.9 Ações no computador (com aprovação)
+### 4.9 Ações no computador e nas integrações (aprovação em tempo real)
 
 ```
 você: "abra a calculadora"
-  → Claude tenta: Bash("setsid -f gnome-calculator")
-  → Claude Code BLOQUEIA (modo dontAsk) e devolve o pedido exato
-  → Delsin mostra o cartão  AÇÃO AGUARDANDO APROVAÇÃO  ▸ Executar comando: setsid -f gnome-calculator
-  → [APROVAR] → o PRÓPRIO Delsin executa exatamente esse texto → o resultado volta ao Claude → resposta falada
-  → [RECUSAR] → nada roda; o Claude é avisado
+  → Claude quer usar: Bash("setsid -f gnome-calculator")
+  → Claude Code PERGUNTA ao Delsin (can_use_tool, via --permission-prompt-tool stdio) e espera
+  → cartão  AÇÃO AGUARDANDO APROVAÇÃO  ▸ Executar comando: setsid -f gnome-calculator
+  → [APROVAR] → o Claude executa exatamente esse pedido e continua a resposta
+  → [RECUSAR] → nada roda; o Claude é instruído a não tentar contornar
+  → sem clique em 5 min → recusado automaticamente
 ```
 
-| O Claude faz **sem pedir** | Exige **sua aprovação** no cartão | **Nunca** |
+| Roda **sem pedir** | Exige **sua aprovação** no cartão | **Nunca** |
 |---|---|---|
 | Ler arquivos (Read/Glob/Grep) | Qualquer outro comando de terminal | Ler `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/delsin`, chaveiros, perfis de navegador, `*.env`, `*.pem`, `*.key` |
-| Pesquisar e abrir páginas da web | Criar/substituir arquivos (Write) | `sudo` (sem terminal para senha; falha) |
-| `df`, `free`, `uptime`, `uname`, `lscpu`, `lsblk`, `ps`, `date`, `whoami`, `hostnamectl`, `nvidia-smi`, `sensors`, `ls`, `du`, `which`, `ip addr`, `systemctl status`, `wpctl status` | Editar arquivos (Edit) — só dentro da sua pasta pessoal | Escrever fora da pasta pessoal |
+| Pesquisar e abrir páginas da web | Criar ou editar arquivos | `sudo` (sem terminal para senha; falha) |
+| `df`, `free`, `uptime`, `uname`, `lscpu`, `lsblk`, `ps`, `date`, `whoami`, `hostnamectl`, `nvidia-smi`, `sensors`, `ls`, `du`, `which`, `ip addr`, `systemctl status`, `wpctl status` | Integrações que **escrevem**: enviar, criar, editar, apagar, mover, rascunho (ex.: enviar e-mail, criar página no Notion) | — |
+| Integrações que só **leem**: buscar, listar, obter, consultar (`services/integrations.py → is_read_only`) | | |
 
-Regras do executor (`services/actions.py`):
-- Executa **exatamente** o texto mostrado no cartão, com `bash -c`, na sua pasta pessoal, em nova sessão de processos.
-- Timeout de 120 s (o grupo de processos inteiro é encerrado); programas abertos em segundo plano continuam rodando.
-- Várias ações no mesmo cartão rodam em ordem e **param na primeira falha**.
+- O cartão mostra a ferramenta e **os parâmetros exatos** (destinatário, assunto, comando…). O que você aprova é o que roda (`updatedInput` = pedido original).
 - A aprovação é **só por clique**, nunca por voz (um áudio de TV não pode aprovar nada).
+- Se você ativou a resposta por voz, o Delsin avisa: "Preciso da sua aprovação no painel para continuar."
+
+### 4.10 Resposta em streaming
+
+Com o cérebro Claude, a resposta aparece na conversa enquanto é escrita (bloco "escrevendo…") e a voz **fala cada frase assim que ela fecha** (`voice/chunker.py`). Medido: primeira frase pronta para falar em ~2 s, resposta completa em ~3 s. No fim, o bloco é substituído pelo texto final limpo. O Ollama ainda responde de uma vez.
+
+### 4.11 Palavra de ativação "Delsin"
+
+Ligue em **MÓDULOS → ATIVAR DIZENDO "DELSIN"** (a preferência fica salva).
+
+- **100% local:** escuta contínua com `pw-record` → detector de fala por energia → Whisper `base` (faster-whisper, CPU) só nos trechos com fala. Nenhum áudio sai da máquina até a palavra ser detectada.
+- **"Ei, Delsin"** → bip → o Delsin abre o microfone para o comando.
+- **"Delsin, que horas são?"** dito de uma vez → bip → o próprio trecho é transcrito e executado (sem pedir para repetir).
+- Fica surda enquanto o Delsin fala ou já está ouvindo (não se ativa com a própria voz).
+- Custos: modelo `base` ~145 MB (baixado na 1ª ativação para `~/.cache/delsin/whisper`); ~0,4–0,6 s de CPU por trecho de fala do ambiente; em silêncio, quase zero.
+- Precisão medida com vozes sintéticas: 25/30 (inclui 1 falso positivo em 15 frases sem a palavra). "Ei, Delsin" é mais confiável que "Delsin" sozinho. Ajuste: `DELSIN_WAKE_MODEL=small` (mais preciso, mais CPU) ou `tiny` (mais leve, erra mais). Com `DELSIN_DEBUG=1`, o log mostra o que o Whisper ouviu.
 
 ---
 
@@ -381,7 +412,7 @@ delsin/
 │   └── builtin.py       # clock, system_status, help
 ├── services/
 │   ├── telemetry.py     # CPU, memória, disco, temperatura, carga (/proc, /sys)
-│   └── actions.py       # ActionRunner: executa ações APROVADAS (Bash/Write/Edit)
+│   └── integrations.py  # mcp.json gerado das chaves + política leitura livre / escrita com aprovação
 ├── llm/
 │   ├── brain.py         # Contrato Brain + PendingAction (ações bloqueadas)
 │   ├── claude_code.py   # ClaudeCodeBrain: sessão `claude -p` stream-json + política de permissões
@@ -394,18 +425,21 @@ delsin/
 │   ├── tts.py           # TextToSpeech: fila, perfil, fallback, interrupção
 │   ├── engines.py       # ElevenLabsEngine, PiperEngine e EspeakEngine → PCM
 │   ├── player.py        # PcmPlayer (pw-play > paplay > aplay em subprocesso)
+│   ├── chunker.py       # Fatia o streaming em frases para a voz
+│   ├── wake.py          # Palavra de ativação "Delsin" (Whisper local)
 │   └── alsa.py          # Silencia o ruído da libasound no stderr
 ├── gui/
 │   ├── dashboard.py     # Janela principal (layout HUD em 3 colunas)
 │   ├── widgets.py       # HudPanel, GridSurface, calendário, Neural Trace, métricas
-│   ├── voice_dialog.py  # Janela de configuração de voz
+│   ├── voice_dialog.py  # Janela de voz e microfone
+│   ├── integrations_dialog.py  # Janela de integrações (Notion, Google)
 │   ├── events.py        # Eventos thread → GUI
 │   └── theme.py         # Paleta, fonte, track() e blend()
 └── tests/
     ├── test_agent.py
     ├── test_voice.py
     ├── test_llm.py      # Claude Code falso (fake_claude.py) + Ollama falso
-    ├── test_services.py # executor de ações, segredos, ElevenLabs falso
+    ├── test_services.py # segredos, ElevenLabs falso, política de integrações
     └── fake_claude.py   # imita o protocolo stream-json do `claude -p`
 ```
 
@@ -466,7 +500,8 @@ Entrada (texto ou voz)
 | `delsin-telemetry` | Amostra métricas do host a cada 2 s | Não |
 | `delsin-mic-test` | Teste de nível do microfone (sob demanda) | Não |
 | `delsin-claude-out` / `-err` | Leem a saída do processo `claude -p` | Não |
-| `delsin-action` | Executa ações aprovadas e devolve o resultado ao cérebro | Não |
+| `delsin-wake` | Escuta contínua da palavra "Delsin" | Não |
+| `delsin-integration` | Salva token e reinicia a sessão com o novo `mcp.json` | Não |
 | `delsin-key` | Valida a chave da ElevenLabs | Não |
 | `delsin-boot` (fim) | Conecta ao Ollama e pré-carrega o modelo | Não |
 
@@ -636,6 +671,8 @@ O arquivo é gravado de forma atômica (temporário + rename). Arquivo ausente, 
 | `DELSIN_BRAIN` | `claude` (padrão) ou `ollama` |
 | `DELSIN_CLAUDE_MODEL` | Modelo do Claude (padrão `claude-opus-5-5`) |
 | `DELSIN_CLAUDE_EFFORT` | `low` (padrão), `medium`, `high`, `xhigh`, `max` |
+| `DELSIN_WAKE_MODEL` | Modelo Whisper da ativação: `tiny`, `base` (padrão), `small` |
+| `NOTION_TOKEN` | Token da integração do Notion (prioridade sobre o arquivo de segredos) |
 | `ELEVENLABS_API_KEY` | Chave da ElevenLabs (tem prioridade sobre o arquivo de segredos) |
 | `DELSIN_LLM_MODEL` | Modelo do Ollama (padrão `qwen2.5:3b`) |
 | `DELSIN_LLM_URL` | Endereço do Ollama (padrão `http://127.0.0.1:11434`) |
@@ -652,7 +689,9 @@ O arquivo é gravado de forma atômica (temporário + rename). Arquivo ausente, 
 | `~/.local/share/delsin/logs/` | Logs | `0700` |
 | `~/.local/share/delsin/voices/` | Modelos Piper (`.onnx` + `.onnx.json`, ~63 MB cada) | `0700` |
 | `~/.local/share/delsin/voice_profile.json` | Perfil de voz salvo | herdada |
-| `~/.config/delsin/secrets.env` | Chaves de API (ElevenLabs) | `0600` (pasta `0700`) |
+| `~/.config/delsin/secrets.env` | Chaves de API (ElevenLabs, Notion) | `0600` (pasta `0700`) |
+| `~/.config/delsin/mcp.json` | Integrações MCP (gerado; contém tokens) | `0600` |
+| `~/.cache/delsin/whisper/` | Modelo Whisper da palavra de ativação | herdada |
 | `~/.cache/delsin/` | Cache (reservado) | `0700` |
 
 As pastas são criadas na inicialização (`ensure_dirs()`), e a permissão é reaplicada a cada execução.
@@ -740,7 +779,8 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | S10 | O cliente do Ollama **só** aceita servidores em loopback (salvo `DELSIN_LLM_ALLOW_REMOTE=1`) e ignora `http_proxy` | Conversas não saem da máquina por engano |
 | S11 | Ações que modificam o sistema **DEVEM** passar pelo cartão de aprovação; o Claude Code roda em `--permission-mode dontAsk` com lista de permissões só de leitura | Texto vindo de voz, de páginas web ou da própria LLM é não confiável (injeção de prompt) |
 | S13 | **NUNCA** usar `--dangerously-skip-permissions` nem liberar `Bash` sem padrão no Claude Code do Delsin | Daria ao modelo execução livre na sua conta |
-| S14 | O Claude Code do Delsin roda com `--safe-mode` (ignora CLAUDE.md, hooks, plugins e MCP pessoais) e sem `ANTHROPIC_API_KEY` | Isolamento e cobrança previsível (assinatura) |
+| S14 | O Claude Code do Delsin roda com `--setting-sources ""` (ignora hooks, plugins e permissões pessoais), `--strict-mcp-config` (só as integrações do Delsin), `--disable-slash-commands` e sem `ANTHROPIC_API_KEY` | Isolamento e cobrança previsível (assinatura) |
+| S16 | Integrações: leitura roda direto; **toda escrita** (enviar e-mail, criar/editar/apagar) passa pelo cartão. Ferramentas novas que não pareçam leitura caem automaticamente em "exige aprovação" | Texto de e-mails e páginas pode conter instruções maliciosas (injeção de prompt) |
 | S15 | Caminhos sensíveis (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/delsin`, chaveiros, navegadores, `*.env`, `*.pem`, `*.key`) são **negados** para leitura | O que o Claude lê vai para a Anthropic |
 | S12 | O histórico da conversa fica só em memória; não é gravado em disco nem em log | Privacidade |
 
@@ -770,12 +810,11 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | Síntese Piper não tem timeout | Uma frase enorme bloqueia a fila de fala | Entradas limitadas a 2000 caracteres |
 | Animação do Neural Trace | ~1–2% de CPU a 30 fps | 15 fps quando ocioso |
 | Claude via assinatura | 3–6 s por resposta (Opus, esforço low); conta nos limites do plano; ao atingir o limite, as respostas falham até o reset | Esforço `low`; skills locais respondem o básico sem gastar cota; Ollama como reserva |
-| Sem streaming de resposta | O texto aparece e é falado só no fim | Streaming por frase (roadmap) |
-| Ações: só Bash, Write e Edit | Outras ferramentas bloqueadas são ignoradas | — |
+| Palavra de ativação imperfeita | Pode não ouvir "Delsin" isolado ou disparar raramente sem querer | "Ei, Delsin"; `DELSIN_WAKE_MODEL=small` |
 | Aprovação só por clique | Não dá para aprovar por voz | Intencional (segurança) |
 | ElevenLabs cobra por caractere | Respostas longas gastam créditos | Respostas curtas por padrão; fallback para Piper |
 | LLM só na CPU (Ollama sem driver NVIDIA) | 3–10 s por resposta | Modelo 3B, pré-carregamento, driver NVIDIA |
-| Sem streaming de resposta | A resposta aparece (e é falada) só quando termina | Streaming token a token (roadmap) |
+| Ollama sem streaming | Com `DELSIN_BRAIN=ollama`, a resposta chega de uma vez | Streaming no Ollama (roadmap) |
 | LLM ocupa RAM | ~3 GB com `qwen2.5:3b` carregado, liberada após 30 min sem uso | Ajustar `keep_alive` |
 | Modelos 3B erram fatos | Respostas confiantes e erradas são possíveis | Modelo maior / GPU; nunca usar para decisões críticas |
 | Skills só carregam no boot | Nova skill exige reiniciar | Hot-reload (futuro) |
@@ -810,9 +849,9 @@ Acompanhar em tempo real: `tail -f ~/.local/share/delsin/logs/delsin.log`
 | "O Claude demorou demais e a sessão foi reiniciada" | Pesquisa/leitura longa ou instabilidade | Repetir; perguntas mais objetivas |
 | Ação aprovada "FALHOU" | Comando inválido, sem permissão ou precisa de `sudo` | Ler a saída no log; pedir outra forma ao Delsin |
 | ElevenLabs: "chave inválida" / "créditos esgotados" | Chave errada / plano sem créditos | Gerar nova chave; ver créditos em elevenlabs.io (o Delsin fala com o Piper enquanto isso) |
-| IA · LLM: "Ollama inacessível … Connection refused" | Ollama não instalado ou parado (só com `DELSIN_BRAIN=ollama`) | §2.3; `sudo systemctl start ollama` |
+| IA · LLM: "Ollama inacessível … Connection refused" | Ollama não instalado ou parado (só com `DELSIN_BRAIN=ollama`) | §2.4; `sudo systemctl start ollama` |
 | IA · LLM: "modelo … não baixado" | Modelo ausente | `ollama pull qwen2.5:3b` |
-| Resposta da LLM muito lenta | Rodando na CPU / pouca RAM livre | Feche apps pesados; use um modelo 3B; driver NVIDIA (§2.3) |
+| Resposta da LLM muito lenta | Rodando na CPU / pouca RAM livre | Feche apps pesados; use um modelo 3B; driver NVIDIA (§2.4) |
 | LLM responde em inglês ou longo demais | Modelo pequeno ignorando instruções | Peça de novo; troque de modelo (`DELSIN_LLM_MODEL`) |
 | Painel lento ao arrastar/redimensionar | Redesenho do grid de fundo | Esperado durante o redimensionamento; para quando a janela para |
 | Ctrl+C demora a fechar | Uma escuta ou skill ainda em andamento | Aguardar o timeout correspondente (máx. 10 s) |
@@ -866,10 +905,9 @@ git push        # pede autenticação: usar um Personal Access Token (não a sen
 | 0.2 | Painel HUD, telemetria, TTS Piper com perfil de voz configurável ✅ |
 | 0.3 | Escolha de microfone com teste de nível; LLM local (Ollama) como fallback conversacional ✅ |
 | 0.4 | Cérebro Claude via assinatura (Claude Code), ações no PC com aprovação, voz ElevenLabs ✅ |
-| 0.4.x | Streaming por frase (texto e voz começam antes do fim); escolha do cérebro/modelo na GUI; wake word "Delsin" |
-| 0.5 | STT local (faster-whisper); memória de longo prazo opt-in |
-| 0.4.x | Memória de conversa persistida (opcional, criptografada) em `~/.local/share/delsin` |
-| 0.5 | Wake word ("Delsin") |
+| 0.5 | Streaming por frase, palavra de ativação "Delsin", aprovação em tempo real para qualquer ferramenta, integração Notion ✅ |
+| 0.5.x | Google: Gmail e Agenda (`workspace-mcp`) + Classroom (servidor próprio); diagnóstico diário ("o que tenho pendente?") |
+| 0.6 | STT local (Whisper) para os comandos; escolha do cérebro/modelo na GUI; memória de longo prazo opt-in |
 | 1.0 | Empacotamento de agentes especialistas: Core + Persona + subconjunto de skills |
 
 ---

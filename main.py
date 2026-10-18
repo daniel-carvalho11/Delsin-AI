@@ -15,13 +15,14 @@ Modelo de threads:
   delsin-voice-dl .... download de vozes (sob demanda)
   delsin-mic-test .... teste de nível do microfone (sob demanda)
   delsin-boot (fim) .. abre o cérebro (sessão Claude Code ou modelo do Ollama)
-  delsin-action ...... executa ações APROVADAS no painel + devolve o resultado ao cérebro
+  delsin-wake ........ escuta contínua da palavra "Delsin" (Whisper local)
   delsin-key ......... valida a chave da ElevenLabs
 Comunicação para a GUI: somente via queue.Queue.
 """
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import signal
 import sys
@@ -32,23 +33,27 @@ from pathlib import Path
 
 from config import DEFAULT_PERSONA, ensure_dirs, load_settings
 from config.settings import APP_NAME, APP_VERSION, LOG_DIR, VOICE_PROFILE_PATH, VOICES_DIR, Settings
-from config.secrets import get_secret, mask, set_secret
+from config.secrets import MCP_CONFIG_PATH, get_secret, mask, set_secret
+from config.settings import CACHE_DIR
 from config.voice_profile import VoiceCatalog, VoiceProfile, load_profile, save_profile
 from core import Agent, Request, Response, Source
 from core.logger import LogItem, setup_logging
 from gui import (
-    ActionRequestEvent, Activity, ActivityEvent, Dashboard, DashboardCallbacks, MessageEvent, MetricsEvent, MetricView,
+    ActionRequestEvent, Activity, ActivityEvent, IntegrationsEvent, StreamEvent, Dashboard, DashboardCallbacks, MessageEvent, MetricsEvent, MetricView,
     ModuleState, StatusEvent, UiEvent, VoiceCatalogEvent,
 )
-from llm import Brain, ClaudeCodeBrain, ConversationSkill, OllamaBrain, OllamaClient, PendingAction, actions_of
-from services.actions import ActionRunner
+from llm import Brain, ClaudeCodeBrain, ConversationSkill, OllamaBrain, OllamaClient, PendingAction, clean_reply
+from services.integrations import is_read_only, write_mcp_config
 from services.telemetry import TelemetrySampler
 from skills import discover_skills
 from voice import SpeechToText, STTError, SynthesisError, TextToSpeech
+from voice.chunker import SentenceChunker
+from voice.wake import WakeWordListener, strip_wake
 
 log = logging.getLogger("delsin.app")
 
 TELEMETRY_INTERVAL_S = 2.0
+APPROVAL_TIMEOUT_S = 300.0  # sem resposta no cartão em 5 min = recusado
 
 
 class DelsinApp:
@@ -63,11 +68,22 @@ class DelsinApp:
             on_speaking=lambda speaking: self._set_activity_flag("speaking", speaking),
             elevenlabs_key=lambda: get_secret("ELEVENLABS_API_KEY"),
         )
-        self.actions = ActionRunner()
-        self._pending_actions: dict[str, tuple[PendingAction, ...]] = {}
-        self._actions_lock = threading.Lock()
+        self.profile = profile
+        self.wake = WakeWordListener(
+            CACHE_DIR / "whisper", on_wake=self._on_wake,
+            is_muted=lambda: self.tts.speaking or self.stt.busy,
+            device=lambda: self.profile.input_device,
+            model_size=os.environ.get("DELSIN_WAKE_MODEL", "base"),
+        )
+        # Aprovações em espera: id -> [evento, decisão]
+        self._approvals: dict[str, list] = {}
+        self._approvals_lock = threading.Lock()
+        # Streaming por requisição: texto acumulado, fatiador de frases e se deve falar
+        self._streams: dict[str, tuple[list[str], SentenceChunker | None]] = {}
+        self._wants_voice: dict[str, bool] = {}
         self.telemetry = TelemetrySampler()
         self.llm: ConversationSkill | None = None
+        self.integrations: list[str] = []
         self.speak_responses = False
         self._shutdown = threading.Event()
         self._activity_lock = threading.Lock()
@@ -90,6 +106,9 @@ class DelsinApp:
                 on_test_mic=self._test_mic,
                 on_save_elevenlabs_key=self._save_elevenlabs_key,
                 on_action_decision=self._decide_action,
+                on_toggle_wake=self._toggle_wake,
+                get_integrations=lambda: list(self.integrations),
+                on_save_integration=self._save_integration,
             ),
             app_name=APP_NAME,
             version=APP_VERSION,
@@ -163,15 +182,26 @@ class DelsinApp:
 
         self._post(MessageEvent("delsin", DEFAULT_PERSONA.greeting))
         self._boot_llm()
+        if self.profile.wake_word:
+            self._apply_wake()
+        else:
+            self._status("wake", ModuleState.OFFLINE, "desligada")
 
     def _make_brain(self) -> Brain:
         cfg = self.settings.llm
+        try:
+            self.integrations = write_mcp_config(MCP_CONFIG_PATH, get_secret)
+        except OSError as exc:
+            log.warning("Não foi possível gerar o mcp.json: %s", exc)
         if cfg.brain == "ollama":
             client = OllamaClient(cfg.base_url, cfg.request_timeout_s, allow_remote=cfg.allow_remote)
             return OllamaBrain(client, cfg.model, temperature=cfg.temperature, context_tokens=cfg.context_tokens,
                                max_response_tokens=cfg.max_response_tokens, history_turns=cfg.history_turns,
                                keep_alive=cfg.keep_alive)
-        return ClaudeCodeBrain(cfg.claude_model, cfg.claude_effort, cfg.claude_timeout_s, Path.home())
+        brain = ClaudeCodeBrain(cfg.claude_model, cfg.claude_effort, cfg.claude_timeout_s, Path.home(),
+                                mcp_config=MCP_CONFIG_PATH)
+        brain.approver = self._approve
+        return brain
 
     def _boot_llm(self) -> None:
         """Abre o cérebro (Claude Code ou Ollama). Falha aqui não bloqueia o resto."""
@@ -184,6 +214,7 @@ class DelsinApp:
             self._status("llm", ModuleState.ERROR, str(exc))
             return
         self.llm = ConversationSkill(brain, DEFAULT_PERSONA)
+        self.llm.on_stream = self._on_stream
         # Registrado mesmo se o cérebro estiver indisponível: o Ollama pode subir
         # depois, e a sessão do Claude Code se recria sozinha na próxima pergunta.
         self.agent.register(self.llm)
@@ -202,6 +233,8 @@ class DelsinApp:
             log.warning("Falha ao iniciar o cérebro: %s", exc)
             self._status("llm", ModuleState.ERROR, str(exc))
             return
+        if self.integrations and brain.name == "claude":
+            detail += " · integrações: " + ", ".join(self.integrations)
         log.info("Cérebro: %s", detail)
         self._status("llm", ModuleState.ONLINE, detail)
 
@@ -214,6 +247,7 @@ class DelsinApp:
 
     def submit(self, text: str, source: Source) -> None:
         request = Request(text=text, source=source)
+        self._wants_voice[request.id] = self.speak_responses or source is Source.VOICE
         self._post(MessageEvent("user", text, "voz" if source is Source.VOICE else "texto"))
         self._change_pending(+1)
         self.agent.submit(request, self._on_response)
@@ -223,10 +257,28 @@ class DelsinApp:
         self._change_pending(-1)
         status = "ok" if response.success else "falha"
         meta = f"{status}  ·  {response.skill}  ·  {response.latency_ms:.0f} ms"
+        wants_voice = self._wants_voice.pop(request.id, False)
+        stream = self._streams.pop(request.id, None)
         self._post(MessageEvent("delsin", response.text, meta, failed=not response.success,
-                                latency_ms=response.latency_ms))
+                                latency_ms=response.latency_ms, stream_id=request.id if stream else ""))
         self._after_brain(response)
-        self._deliver_voice(response, self.speak_responses or request.source is Source.VOICE)
+        if stream and stream[1] is not None:
+            for sentence in stream[1].flush():  # o resto que ainda não tinha sido falado
+                self.tts.say(sentence)
+        elif not stream:
+            self._deliver_voice(response, wants_voice)
+
+    def _on_stream(self, request_id: str, delta: str) -> None:
+        """Pedaço de resposta chegando: atualiza a GUI e fala cada frase assim que fecha."""
+        if request_id not in self._streams:
+            chunker = SentenceChunker() if self._wants_voice.get(request_id) else None
+            self._streams[request_id] = ([], chunker)
+        parts, chunker = self._streams[request_id]
+        parts.append(delta)
+        self._post(StreamEvent(request_id, clean_reply("".join(parts))))
+        if chunker is not None:
+            for sentence in chunker.feed(delta):
+                self.tts.say(sentence)
 
     def _after_brain(self, response: Response) -> None:
         if response.skill != "llm" or self.llm is None:
@@ -237,12 +289,6 @@ class DelsinApp:
             self._status("llm", ModuleState.ONLINE, f"{self.llm.brain.label} · {self.llm.model} · {speed}")
         else:
             self._status("llm", ModuleState.ERROR, "cérebro indisponível — veja o log")
-        actions = actions_of(response)
-        if actions:
-            request_id = uuid.uuid4().hex[:8]
-            with self._actions_lock:
-                self._pending_actions[request_id] = actions
-            self._post(ActionRequestEvent(request_id, tuple(a.summary for a in actions)))
 
     def _deliver_voice(self, response: Response, wants_voice: bool) -> None:
         if response.speak and wants_voice:
@@ -301,39 +347,100 @@ class DelsinApp:
 
         threading.Thread(target=worker, name="delsin-key", daemon=True).start()
 
-    # ---------- ações aprovadas ----------
+    # ---------- aprovação de ações (em tempo real, durante a resposta) ----------
+
+    def _approve(self, action: PendingAction) -> bool:
+        """Chamado pelo cérebro (thread do Agent) quando quer usar algo não liberado.
+
+        Bloqueia até o clique no cartão, ou recusa após APPROVAL_TIMEOUT_S.
+        """
+        if is_read_only(action.tool):
+            log.info("Leitura liberada automaticamente: %s", action.summary)
+            return True
+        request_id = uuid.uuid4().hex[:8]
+        decided = threading.Event()
+        with self._approvals_lock:
+            self._approvals[request_id] = [decided, False]
+        self._post(ActionRequestEvent(request_id, (action.summary,)))
+        if self.speak_responses or any(self._wants_voice.values()):
+            self.tts.say(DEFAULT_PERSONA.action_needed)
+        if not decided.wait(APPROVAL_TIMEOUT_S):
+            self._post(MessageEvent("system", "Aprovação expirou; a ação foi recusada.", "segurança", failed=True))
+        with self._approvals_lock:
+            return bool(self._approvals.pop(request_id, [None, False])[1])
 
     def _decide_action(self, request_id: str, approved: bool) -> None:
-        with self._actions_lock:
-            actions = self._pending_actions.pop(request_id, ())
-        if not actions or self.llm is None:
-            return
+        with self._approvals_lock:
+            entry = self._approvals.get(request_id)
+            if entry is None:
+                return  # já expirou
+            entry[1] = approved
+            entry[0].set()
 
+    # ---------- integrações (MCP) ----------
+
+    def _save_integration(self, name: str, token: str) -> None:
         def worker() -> None:
-            self._change_pending(+1)
             try:
-                if not approved:
-                    log.info("Ações recusadas pelo usuário: %s", [a.summary for a in actions])
-                    note = ("O usuário RECUSOU as ações propostas: "
-                            + "; ".join(a.summary for a in actions)
-                            + ". Nada foi executado. Não tente de novo; confirme em uma frase.")
-                else:
-                    results = []
-                    for action in actions:
-                        result = self.actions.run(action.tool, action.input)
-                        results.append(f"{action.summary} -> {'OK' if result.ok else 'FALHOU'}: {result.output}")
-                        if not result.ok:
-                            break  # não segue executando depois de uma falha
-                    note = "O usuário APROVOU e o Delsin executou:\n" + "\n".join(results)
-                response = self.llm.follow_up(note)
-            finally:
-                self._change_pending(-1)
-            meta = f"{'ok' if response.success else 'falha'}  ·  ação {'aprovada' if approved else 'recusada'}"
-            self._post(MessageEvent("delsin", response.text, meta, failed=not response.success))
-            self._after_brain(response)
-            self._deliver_voice(response, self.speak_responses)
+                set_secret(name, token)
+                self.integrations = write_mcp_config(MCP_CONFIG_PATH, get_secret)
+            except (OSError, ValueError) as exc:
+                self._post(IntegrationsEvent(tuple(self.integrations), f"Falha ao salvar: {exc}", "error"))
+                return
+            if self.llm is not None and self.llm.brain.name == "claude":
+                self.llm.brain.reset()  # nova sessão carrega o mcp.json atualizado
+            message = ("Integração salva. Teste: \"Delsin, o que tem no meu Notion?\" "
+                       "(se o token estiver errado, a resposta dirá 401)")
+            log.info("Integrações ativas: %s", self.integrations)
+            self._post(IntegrationsEvent(tuple(self.integrations), message, "ok"))
 
-        threading.Thread(target=worker, name="delsin-action", daemon=True).start()
+        threading.Thread(target=worker, name="delsin-integration", daemon=True).start()
+
+    # ---------- palavra de ativação ----------
+
+    def _toggle_wake(self, enabled: bool) -> None:
+        self.profile = replace(self.profile, wake_word=enabled)
+        try:
+            save_profile(self.profile, VOICE_PROFILE_PATH)
+        except OSError as exc:
+            log.warning("Não foi possível salvar a preferência: %s", exc)
+        threading.Thread(target=self._apply_wake, name="delsin-wake-boot", daemon=True).start()
+
+    def _apply_wake(self) -> None:
+        if not self.profile.wake_word:
+            self.wake.stop()
+            self._status("wake", ModuleState.OFFLINE, "desligada")
+            return
+        ok, detail = self.wake.check()
+        if not ok or not self.stt.available or self.stt.backend != "pipewire":
+            self._status("wake", ModuleState.ERROR, detail if not ok else "requer microfone via PipeWire")
+            return
+        self._status("wake", ModuleState.STARTING, f"carregando Whisper {self.wake.model_size} (1ª vez baixa o modelo)…")
+        try:
+            self.wake.start()
+        except Exception as exc:
+            log.exception("Falha ao iniciar a palavra de ativação")
+            self._status("wake", ModuleState.ERROR, str(exc))
+            return
+        self._status("wake", ModuleState.ONLINE, f"diga \"Delsin\" · {detail}")
+
+    def _on_wake(self, pcm: bytes, heard: str) -> None:
+        self._status("wake", ModuleState.ACTIVE, "ativado!")
+        try:
+            if len(strip_wake(heard)) >= 3:
+                # "Delsin, que horas são?" dito de uma vez: o comando já está no trecho.
+                self.tts.play_chime()
+                text = self.stt.transcribe_pcm(pcm)
+                command = strip_wake(text) if text else ""
+                if command:
+                    self.submit(command, Source.VOICE)
+                    return
+            self.tts.play_chime()
+            self.listen()
+        except STTError as exc:
+            log.warning("Ativação: %s", exc)
+        finally:
+            self._status("wake", ModuleState.ONLINE, "diga \"Delsin\"")
 
     def _test_mic(self, device: str) -> None:
         def worker() -> None:
@@ -356,6 +463,8 @@ class DelsinApp:
         threading.Thread(target=worker, name="delsin-mic-test", daemon=True).start()
 
     def _save_voice(self, profile: VoiceProfile) -> None:
+        # A janela de voz não conhece a preferência de ativação: preserva a atual.
+        profile = replace(profile, wake_word=self.profile.wake_word)
         try:
             self.stt.set_input_device(profile.input_device)
         except STTError as exc:
@@ -363,6 +472,7 @@ class DelsinApp:
         else:
             self._status("stt", ModuleState.ONLINE, self.stt.describe())
         effective = self.tts.set_profile(profile)
+        self.profile = effective
         try:
             save_profile(effective, VOICE_PROFILE_PATH)
         except OSError as exc:
@@ -393,6 +503,10 @@ class DelsinApp:
             return
         log.info("Desligando…")
         self._shutdown.set()
+        with self._approvals_lock:
+            for entry in self._approvals.values():
+                entry[0].set()  # libera quem esperava aprovação (decisão = recusa)
+        self.wake.stop()
         self.tts.shutdown()
         self.agent.shutdown()
 

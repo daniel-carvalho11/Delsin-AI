@@ -24,9 +24,10 @@ from config.voice_profile import VoiceCatalog, VoiceProfile
 from core.logger import LogItem
 from gui import theme
 from gui.events import (
-    ActionRequestEvent, Activity, ActivityEvent, MessageEvent, MetricsEvent, ModuleState, StatusEvent, UiEvent,
+    ActionRequestEvent, Activity, ActivityEvent, IntegrationsEvent, StreamEvent, MessageEvent, MetricsEvent, ModuleState, StatusEvent, UiEvent,
     VoiceCatalogEvent,
 )
+from gui.integrations_dialog import IntegrationsDialog
 from gui.voice_dialog import VoiceDialog, VoiceDialogCallbacks
 from gui.widgets import (
     Avatar, CalendarCanvas, GridSurface, HudPanel, ListRow, LoadSegments, MetricRow, ModuleRow,
@@ -52,6 +53,9 @@ class DashboardCallbacks:
     on_test_mic: Callable[[str], None]
     on_save_elevenlabs_key: Callable[[str], None]
     on_action_decision: Callable[[str, bool], None]
+    on_toggle_wake: Callable[[bool], None]
+    get_integrations: Callable[[], list[str]]
+    on_save_integration: Callable[[str, str], None]
 
 
 class Dashboard(ctk.CTk):
@@ -61,6 +65,7 @@ class Dashboard(ctk.CTk):
         ("stt", "MICROFONE · STT"),
         ("tts", "VOZ · TTS"),
         ("llm", "IA · LLM"),
+        ("wake", "ATIVAÇÃO · \"DELSIN\""),
     )
     METRICS = (
         ("cpu", "▣", "Processamento"),
@@ -95,8 +100,10 @@ class Dashboard(ctk.CTk):
         self._latencies: list[float] = []
         self._started = time.monotonic()
         self._message_marks: deque[str] = deque()
+        self._live: set[str] = set()  # respostas em streaming ainda abertas
         self._message_seq = 0
         self._voice_dialog: VoiceDialog | None = None
+        self._integrations_dialog: IntegrationsDialog | None = None
 
         self.title(f"{app_name} · painel de controle")
         self.geometry("1600x960")
@@ -149,16 +156,16 @@ class Dashboard(ctk.CTk):
         self._load_segments.grid(row=1, column=0, sticky="e", pady=(4, 0))
 
         for column, (glyph, command) in enumerate(
-            (("♪", self.open_voice_settings), (">_", self._toggle_log)), start=4
+            (("♪", self.open_voice_settings), ("⧉", self.open_integrations), (">_", self._toggle_log)), start=4
         ):
             ctk.CTkButton(
                 header, text=glyph, width=42, height=42, corner_radius=3, command=command,
                 fg_color="transparent", hover_color=theme.PANEL_ALT, border_width=1,
                 border_color=theme.BORDER, text_color=theme.TEXT, font=self._font(15, "bold"),
-            ).grid(row=0, column=column, rowspan=2, padx=(0, 12 if column == 4 else 28))
+            ).grid(row=0, column=column, rowspan=2, padx=(0, 28 if column == 6 else 12))
 
         ctk.CTkFrame(header, height=1, fg_color=theme.BORDER, corner_radius=0).grid(
-            row=2, column=0, columnspan=6, sticky="ew")
+            row=2, column=0, columnspan=7, sticky="ew")
 
     def _build_body(self) -> None:
         body = ctk.CTkFrame(self, fg_color=theme.BG, corner_radius=0)
@@ -201,9 +208,16 @@ class Dashboard(ctk.CTk):
             progress_color=theme.TEXT_DIM, button_color=theme.TEXT, fg_color=theme.BAR_BG,
             text_color=theme.TEXT_DIM, font=self._font(11),
         )
-        self._voice_switch.grid(row=0, column=0, sticky="w", pady=(4, 10))
+        self._voice_switch.grid(row=0, column=0, sticky="w", pady=(4, 4))
+        self._wake_switch = ctk.CTkSwitch(
+            controls, text="ATIVAR DIZENDO \"DELSIN\"", state="disabled",
+            command=lambda: self._cb.on_toggle_wake(bool(self._wake_switch.get())),
+            progress_color=theme.TEXT_DIM, button_color=theme.TEXT, fg_color=theme.BAR_BG,
+            text_color=theme.TEXT_DIM, font=self._font(11),
+        )
+        self._wake_switch.grid(row=2, column=0, sticky="w", pady=(0, 10))
         self._hud_button(controls, "CONFIGURAR VOZ", self.open_voice_settings).grid(
-            row=1, column=0, sticky="ew")
+            row=3, column=0, sticky="ew")
 
         # ---- coluna central
         console = HudPanel(center, self._mono, "Console Neural")
@@ -363,6 +377,13 @@ class Dashboard(ctk.CTk):
                                  self._cb.on_save_elevenlabs_key),
         )
 
+    def open_integrations(self) -> None:
+        if self._integrations_dialog is not None and self._integrations_dialog.winfo_exists():
+            self._integrations_dialog.lift()
+            return
+        self._integrations_dialog = IntegrationsDialog(
+            self, self._mono, self._cb.get_integrations(), self._cb.on_save_integration)
+
     def close(self) -> None:
         if self._closing:
             return
@@ -403,6 +424,11 @@ class Dashboard(ctk.CTk):
                 self._set_activity(event.activity)
             case MetricsEvent():
                 self._apply_metrics(event)
+            case IntegrationsEvent():
+                if self._integrations_dialog is not None and self._integrations_dialog.winfo_exists():
+                    self._integrations_dialog.update_state(list(event.active), event.message, event.tone)
+            case StreamEvent():
+                self._update_live(event)
             case ActionRequestEvent():
                 self._append_action_card(event)
             case VoiceCatalogEvent():
@@ -424,6 +450,10 @@ class Dashboard(ctk.CTk):
             )
         elif event.module == "tts" and event.state is ModuleState.ONLINE:
             self._voice_switch.configure(state="normal")
+        elif event.module == "wake":
+            on = event.state in (ModuleState.ONLINE, ModuleState.ACTIVE, ModuleState.STARTING)
+            self._wake_switch.configure(state="disabled" if event.state is ModuleState.STARTING else "normal")
+            (self._wake_switch.select if on else self._wake_switch.deselect)()
         self._refresh_system_label()
 
     def _apply_metrics(self, event: MetricsEvent) -> None:
@@ -441,28 +471,77 @@ class Dashboard(ctk.CTk):
             text_color=theme.ACTIVITY_COLORS[activity] if activity is not Activity.IDLE else theme.MUTED,
         )
 
-    def _append_message(self, event: MessageEvent) -> None:
-        authors = {"user": "VOCÊ", "delsin": "DELSIN", "system": "SISTEMA"}
-        stamp = datetime.now().strftime("%H:%M:%S")
-        meta = f"   {stamp}" + (f"  ·  {event.meta}" if event.meta else "")
+    # ---- conversa: blocos de mensagem, com trechos "ao vivo" atualizáveis -------------
+
+    _AUTHORS = {"user": "VOCÊ", "delsin": "DELSIN", "system": "SISTEMA"}
+
+    def _put(self, content: str, tags: tuple[str, ...], name: str | None = None) -> None:
+        """Insere no fim; com `name`, marca o trecho (name_s..name_e) para trocar depois.
+
+        Todas as marcas têm gravidade à esquerda e o fim é recalculado na troca:
+        assim o texto inserido depois do trecho nunca "arrasta" as marcas.
+        """
         text = self._chat._textbox
-        self._chat.configure(state="normal")
+        start = text.index("end-1c")
+        text.insert("end", content, tags)
+        if name:
+            for suffix, index in (("_s", start), ("_e", f"{start} + {len(content)} chars")):
+                text.mark_set(name + suffix, index)
+                text.mark_gravity(name + suffix, "left")
+
+    def _replace(self, name: str, content: str, tags: tuple[str, ...]) -> None:
+        text = self._chat._textbox
+        start = text.index(name + "_s")
+        text.delete(name + "_s", name + "_e")
+        text.insert(start, content, tags)
+        text.mark_set(name + "_e", f"{start} + {len(content)} chars")
+
+    def _meta_line(self, meta: str) -> str:
+        return f"   {datetime.now():%H:%M:%S}" + (f"  ·  {meta}" if meta else "")
+
+    def _insert_block(self, event: MessageEvent, live_id: str | None = None) -> None:
+        text = self._chat._textbox
         self._message_seq += 1
         mark = f"msg{self._message_seq}"
         text.mark_set(mark, "end-1c")
         text.mark_gravity(mark, "left")
         self._message_marks.append(mark)
-        text.insert("end", "\n", ("block", "pad"))
-        text.insert("end", authors.get(event.author, event.author.upper()), ("block", f"author_{event.author}"))
-        text.insert("end", meta + "\n", ("block", "meta"))
-        text.insert("end", event.text + "\n", ("block", "failed" if event.failed else "body"))
-        text.insert("end", "\n", ("block", "pad"))
-        text.insert("end", "\n", ("gap",))
-        if len(self._message_marks) > MAX_CHAT_MESSAGES:
+        self._put("\n", ("block", "pad"))
+        self._put(self._AUTHORS.get(event.author, event.author.upper()), ("block", f"author_{event.author}"))
+        self._put(self._meta_line(event.meta), ("block", "meta"), f"{live_id}_meta" if live_id else None)
+        self._put("\n", ("block", "meta"))
+        self._put(event.text, ("block", "failed" if event.failed else "body"), f"{live_id}_body" if live_id else None)
+        self._put("\n", ("block", "body"))
+        self._put("\n", ("block", "pad"))
+        self._put("\n", ("gap",))
+        if len(self._message_marks) > MAX_CHAT_MESSAGES and not self._live:
             # Remove as 50 mensagens mais antigas inteiras (nunca corta uma no meio).
             for _ in range(50):
                 text.mark_unset(self._message_marks.popleft())
             text.delete("1.0", self._message_marks[0])
+
+    def _update_live(self, event: StreamEvent) -> None:
+        self._chat.configure(state="normal")
+        if event.stream_id not in self._live:
+            self._live.add(event.stream_id)
+            self._insert_block(MessageEvent("delsin", event.text, "escrevendo…"), live_id=event.stream_id)
+        else:
+            self._replace(f"{event.stream_id}_body", event.text, ("block", "body"))
+        self._chat.configure(state="disabled")
+        self._chat.see("end")
+
+    def _append_message(self, event: MessageEvent) -> None:
+        self._chat.configure(state="normal")
+        if event.stream_id and event.stream_id in self._live:
+            # Fecha o bloco ao vivo com o texto final (limpo) e os metadados reais.
+            self._live.discard(event.stream_id)
+            self._replace(f"{event.stream_id}_meta", self._meta_line(event.meta), ("block", "meta"))
+            self._replace(f"{event.stream_id}_body", event.text, ("block", "failed" if event.failed else "body"))
+            for part in ("meta", "body"):
+                for suffix in ("_s", "_e"):
+                    self._chat._textbox.mark_unset(f"{event.stream_id}_{part}{suffix}")
+        else:
+            self._insert_block(event)
         self._chat.configure(state="disabled")
         self._chat.see("end")
         if event.latency_ms is not None:

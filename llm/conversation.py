@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime
 
 from config.persona import Persona
 from core.contracts import Request, Response, Skill, SkillContext
-from llm.brain import Brain, PendingAction
+from llm.brain import Brain
 
 log = logging.getLogger("delsin.llm")
 
@@ -44,6 +45,8 @@ class ConversationSkill(Skill):
     def __init__(self, brain: Brain, persona: Persona) -> None:
         self.brain = brain
         self._persona = persona
+        # on_stream(request_id, pedaço_de_texto): ligado pelo main para GUI/voz em tempo real
+        self.on_stream: Callable[[str, str], None] | None = None
 
     @property
     def model(self) -> str:
@@ -72,24 +75,16 @@ class ConversationSkill(Skill):
         if _RESET.search(request.normalized):
             self.brain.reset()
             return Response(self._persona.llm_reset, self.name)
-        return self._ask(f"{now_tag()} {request.text}")
+        stream = self.on_stream
+        on_delta = (lambda delta: stream(request.id, delta)) if stream else None
+        return self._ask(f"{now_tag()} {request.text}", on_delta)
 
-    def follow_up(self, note: str) -> Response:
-        """Mensagem do próprio Delsin para o cérebro (ex.: resultado de uma ação aprovada)."""
-        return self._ask(f"{now_tag()} [mensagem do sistema Delsin, não do usuário] {note}")
-
-    def _ask(self, text: str) -> Response:
-        reply = self.brain.ask(text)
+    def _ask(self, text: str, on_delta=None) -> Response:
+        reply = self.brain.ask(text, on_delta)
         if not reply.success:
             log.warning("Cérebro %s falhou: %s", self.brain.name, reply.text)
             return Response(self._persona.llm_offline.format(reason=reply.text), self.name,
                             success=False, data=reply.meta)
-        answer = clean_reply(reply.text) or ("Preciso da sua confirmação no painel." if reply.actions
-                                             else "Não consegui formular uma resposta.")
-        log.info("Cérebro %s respondeu (%s ms%s)", self.brain.name, reply.meta.get("duration_ms", "?"),
-                 f", {len(reply.actions)} ação(ões) aguardando aprovação" if reply.actions else "")
-        return Response(answer, self.name, data={**reply.meta, "actions": reply.actions})
-
-
-def actions_of(response: Response) -> tuple[PendingAction, ...]:
-    return tuple(response.data.get("actions") or ())
+        answer = clean_reply(reply.text) or "Não consegui formular uma resposta."
+        log.info("Cérebro %s respondeu (%s ms)", self.brain.name, reply.meta.get("duration_ms", "?"))
+        return Response(answer, self.name, data={**reply.meta, "streamed": reply.streamed})

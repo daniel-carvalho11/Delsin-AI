@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from llm.brain import BrainReply
+from llm.brain import BrainReply, DeltaCallback
 
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _MAX_RESPONSE_BYTES = 4_000_000
@@ -146,7 +146,8 @@ class OllamaBrain:
         self._system_prompt = system_prompt
         self._client.warm_up(self.model, self._keep_alive)
 
-    def ask(self, text: str) -> BrainReply:
+    def ask(self, text: str, on_delta: DeltaCallback | None = None) -> BrainReply:
+        """Sem streaming no Ollama por enquanto: a resposta chega inteira."""
         with self._lock:
             history = list(self._history)
         messages = [{"role": "system", "content": self._system_prompt}, *history, {"role": "user", "content": text}]

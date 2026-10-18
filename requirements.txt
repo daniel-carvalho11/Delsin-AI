@@ -5,3 +5,4 @@ customtkinter==6.0.0
 SpeechRecognition==3.17.0   # no Python 3.13+ instala também audioop-lts e standard-aifc
 PyAudio==0.2.14
 piper-tts==1.8.0            # voz neural local; instala onnxruntime (~20 MB)
+faster-whisper==1.2.1      # palavra de ativação "Delsin" (Whisper local, CPU)

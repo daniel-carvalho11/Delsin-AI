@@ -88,3 +88,24 @@ class TextToSpeechTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChunkerAndWakeTest(unittest.TestCase):
+    def test_sentences_come_out_as_soon_as_they_close(self) -> None:
+        from voice.chunker import SentenceChunker
+
+        chunker = SentenceChunker(min_chars=10)
+        self.assertEqual(chunker.feed("Agora são quatorze"), [])
+        self.assertEqual(chunker.feed(" horas. Quer que eu"), ["Agora são quatorze horas."])
+        self.assertEqual(chunker.feed(" **ajude**?"), [])
+        self.assertEqual(chunker.flush(), ["Quer que eu ajude?"])
+
+    def test_wake_word_variants_and_command_extraction(self) -> None:
+        from voice.wake import is_wake, strip_wake
+
+        for heard in ("Delsin.", "Ei Delsin.", "Dessim, que oração.", "Delsi."):
+            self.assertTrue(is_wake(heard), heard)
+        for heard in ("ainda assim", "eu desci a rua", "Descim com o ensinão.", "Delsin, Ei Delsin, Ei Delsin."):
+            self.assertFalse(is_wake(heard), heard)
+        self.assertEqual(strip_wake("Delsin, que horas são?"), "que horas são")
+        self.assertEqual(strip_wake("Ei Delsin."), "")

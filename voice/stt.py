@@ -175,6 +175,12 @@ class SpeechToText:
         log.debug("Pico de captura: %.1f%%", peak * 100)
         return audio, peak
 
+    def transcribe_pcm(self, pcm: bytes, rate: int = 16000) -> str | None:
+        """Transcreve um trecho já gravado (ex.: o da palavra de ativação)."""
+        if not self.available:
+            raise STTError("Módulo de voz não inicializado")
+        return self._recognize(self._sr.AudioData(pcm, rate, 2), peak=1.0)
+
     def _check_signal(self, peak: float) -> None:
         if peak < SILENT_PEAK:
             raise STTError(

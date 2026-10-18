@@ -11,6 +11,7 @@ Por que não pyttsx3: no Linux o runAndWait() trava quando chamado de threads.
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 from collections.abc import Callable
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from config.settings import VoiceSettings
 from config.voice_profile import EngineInfo, VoiceCatalog, VoiceProfile
-from voice.engines import ElevenLabsEngine, EspeakEngine, PiperEngine, SynthesisError
+from voice.engines import AudioClip, ElevenLabsEngine, EspeakEngine, PiperEngine, SynthesisError
 from voice.player import PcmPlayer
 
 log = logging.getLogger("delsin.voice.tts")
@@ -44,6 +45,7 @@ class TextToSpeech:
         self._engines = {e.name: e for e in (self._eleven, self._piper, self._espeak)}
         self._engine_ok: dict[str, tuple[bool, str]] = {}
         self._player = PcmPlayer()
+        self._chime_player = PcmPlayer()
         self._on_speaking = on_speaking or (lambda _speaking: None)
         self._requested = profile.clamped()
         self._profile = self._requested
@@ -162,6 +164,15 @@ class TextToSpeech:
         """Toca uma amostra com o perfil informado, sem salvá-lo."""
         self.stop()
         self.say(text, profile.clamped())
+
+    def play_chime(self) -> None:
+        """Bip curto e local (não gasta créditos de voz). Bloqueia ~0,25 s."""
+        rate, pcm = 22050, bytearray()
+        for freq, seconds in ((880, 0.09), (1320, 0.12)):
+            for i in range(int(rate * seconds)):
+                fade = min(1.0, i / 200, (rate * seconds - i) / 400)
+                pcm += int(9000 * fade * math.sin(2 * math.pi * freq * i / rate)).to_bytes(2, "little", signed=True)
+        self._chime_player.play(AudioClip(bytes(pcm), rate))
 
     def stop(self) -> None:
         with self._state_lock:

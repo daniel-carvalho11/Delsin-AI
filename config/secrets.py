@@ -12,7 +12,11 @@ import tempfile
 from pathlib import Path
 
 _CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-SECRETS_PATH = _CONFIG_HOME / "delsin" / "secrets.env"
+CONFIG_DIR = _CONFIG_HOME / "delsin"
+SECRETS_PATH = CONFIG_DIR / "secrets.env"
+# Servidores MCP (Gmail, Notion...) passados ao Claude Code. Fora do repositório:
+# pode conter tokens. Formato padrão do Claude Code: {"mcpServers": {...}}.
+MCP_CONFIG_PATH = CONFIG_DIR / "mcp.json"
 _NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 
 

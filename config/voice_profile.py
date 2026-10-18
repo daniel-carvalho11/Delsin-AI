@@ -43,6 +43,7 @@ class VoiceProfile:
     volume: float = 1.0
     input_device: str = ""  # microfone (nome do nó PipeWire); "" = padrão do sistema
     cloud_model: str = "eleven_multilingual_v2"  # modelo da ElevenLabs
+    wake_word: bool = False  # ouvir "Delsin" continuamente (local)
 
     def clamped(self) -> VoiceProfile:
         """Normaliza valores vindos de arquivo ou da GUI para faixas seguras."""
@@ -55,6 +56,7 @@ class VoiceProfile:
             volume=round(_clamp(self.volume, VOLUME_RANGE), 2),
             input_device=self.input_device if _DEVICE_NAME.match(str(self.input_device)) else "",
             cloud_model=self.cloud_model if self.cloud_model in dict(ELEVEN_MODELS) else ELEVEN_MODELS[0][0],
+            wake_word=bool(self.wake_word),
         )
 
 

@@ -42,6 +42,7 @@ class MessageEvent:
     meta: str = ""
     failed: bool = False
     latency_ms: float | None = None
+    stream_id: str = ""  # se houve streaming, substitui o bloco "ao vivo" com esse id
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,21 @@ class VoiceCatalogEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamEvent:
+    """Texto parcial de uma resposta em andamento (acumulado, não só o pedaço novo)."""
+
+    stream_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationsEvent:
+    active: tuple[str, ...]
+    message: str = ""
+    tone: str = "info"
+
+
+@dataclass(frozen=True, slots=True)
 class ActionRequestEvent:
     """O cérebro quer modificar algo no PC; o usuário precisa aprovar."""
 
@@ -77,4 +93,5 @@ class ActionRequestEvent:
     items: tuple[str, ...]  # descrições exatas (comando, arquivo) mostradas no cartão
 
 
-UiEvent = StatusEvent | MessageEvent | ActivityEvent | MetricsEvent | VoiceCatalogEvent | ActionRequestEvent
+UiEvent = (StatusEvent | MessageEvent | ActivityEvent | MetricsEvent | VoiceCatalogEvent
+           | ActionRequestEvent | StreamEvent | IntegrationsEvent)

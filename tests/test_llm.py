@@ -18,7 +18,7 @@ from pathlib import Path
 from config.persona import DEFAULT_PERSONA
 from config.settings import CoreSettings
 from core import Agent, Request
-from llm import ClaudeCodeBrain, ConversationSkill, OllamaBrain, OllamaClient, actions_of
+from llm import ClaudeCodeBrain, ConversationSkill, OllamaBrain, OllamaClient
 from llm.claude_code import allowed_rules, denied_rules
 from llm.conversation import clean_reply
 
@@ -59,12 +59,25 @@ class ClaudeCodeBrainTest(unittest.TestCase):
         self.assertIn("eco 1:", first.text)
         self.assertIn("eco 2:", second.text)  # mesmo processo = mesma conversa
 
-    def test_denied_bash_becomes_pending_action(self) -> None:
-        response = self.agent.handle(Request("crie o arquivo com touch"))
-        actions = actions_of(response)
-        self.assertEqual(len(actions), 1)  # WebFetch negado não vira ação executável
-        self.assertEqual(actions[0].input["command"], "touch /tmp/x")
-        self.assertIn("touch /tmp/x", actions[0].summary)
+    def test_approval_is_asked_in_real_time(self) -> None:
+        asked = []
+        self.brain.approver = lambda action: asked.append(action) or True
+        self.assertEqual(self.agent.handle(Request("crie o arquivo com touch")).text, "Arquivo criado.")
+        self.assertEqual(asked[0].input["command"], "touch /tmp/x")
+        self.assertIn("touch /tmp/x", asked[0].summary)
+
+    def test_denial_and_missing_approver_refuse(self) -> None:
+        self.brain.approver = lambda action: False
+        self.assertEqual(self.agent.handle(Request("touch de novo")).text, "Ok, não criei.")
+        self.brain.approver = None  # sem aprovador: sempre nega
+        self.assertEqual(self.agent.handle(Request("touch mais uma")).text, "Ok, não criei.")
+
+    def test_streaming_deltas_reach_listener(self) -> None:
+        chunks = []
+        self.skill.on_stream = lambda request_id, delta: chunks.append(delta)
+        response = self.agent.handle(Request("olá"))
+        self.assertEqual("".join(chunks), "eco 1: " + response.text.split(": ", 1)[1])
+        self.assertTrue(response.data["streamed"])
 
     def test_reset_starts_new_process(self) -> None:
         self.agent.handle(Request("olá"))
@@ -95,8 +108,11 @@ class ClaudeCodeBrainTest(unittest.TestCase):
         self.assertNotIn("Bash", allowed_rules())  # Bash livre nunca é liberado
         self.assertIn("Read(~/.ssh/**)", denied_rules())
         command = self.brain._command()
-        self.assertIn("dontAsk", command)
-        self.assertIn("--safe-mode", command)
+        self.assertIn("stdio", command)       # aprovação vem para o Delsin
+        self.assertIn("manual", command)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertEqual(command[command.index("--setting-sources") + 1], "")
+        self.assertNotIn("--dangerously-skip-permissions", command)
 
 
 class _FakeOllama(BaseHTTPRequestHandler):
@@ -180,7 +196,7 @@ class OllamaBrainTest(unittest.TestCase):
 
     def test_offline_server_gives_friendly_failure(self) -> None:
         skill = ConversationSkill(self._brain(url="http://127.0.0.1:9"), DEFAULT_PERSONA)
-        response = skill.follow_up("teste")
+        response = skill.handle(Request("teste"), self.agent.context)
         self.assertFalse(response.success)
         self.assertIn("IA local está indisponível", response.text)
 
